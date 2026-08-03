@@ -78,10 +78,40 @@ func Do(ctx context.Context, baseURL string, req Request, existingToken string) 
 		}
 		return &r, nil
 	case http.StatusNotFound, http.StatusGone, http.StatusBadRequest:
-		// Ba mã này gộp một câu vì với người lắp đặt thì cách xử lý y hệt nhau:
-		// vào ERP bấm lấy mã mới.
+		// ERP viết sẵn câu tiếng Việt cho từng lý do (mã hết hạn · máy in đã bị xoá ·
+		// máy in đang do máy quầy khác còn sống cầm) — HIỆN NGUYÊN VĂN.
+		//
+		// Trước đây ba mã này gộp thành một câu "mã ghép sai, lấy mã mới" vì lúc đó chỉ
+		// có đúng một nguyên nhân. Nay thì không: người lắp gặp máy in đang thuộc máy
+		// khác mà được bảo đi lấy mã mới sẽ lấy mã mới, ghép lại, hỏng y như cũ, và
+		// không bao giờ đoán ra nguyên nhân thật.
+		if msg := serverMessage(body); msg != "" {
+			return nil, fmt.Errorf("%s", msg)
+		}
 		return nil, fmt.Errorf("mã ghép sai hoặc đã hết hạn — vào ERP mục Máy in bấm lấy mã mới")
 	default:
 		return nil, fmt.Errorf("ERP trả mã %d khi ghép nối: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
+}
+
+// serverMessage rút câu giải thích ERP gửi kèm lỗi.
+//
+// NestJS trả `message` là chuỗi, HOẶC mảng chuỗi khi ValidationPipe gom nhiều lỗi một
+// lúc — không xử lý cả hai dạng thì đúng lúc cần nhất lại rơi về câu mặc định. Thân
+// phản hồi không đọc được thì trả rỗng để nơi gọi dùng câu dự phòng: một dòng JSON thô
+// đập vào mặt người đang đứng lắp máy in thì tệ hơn là một câu chung chung.
+func serverMessage(body []byte) string {
+	var one struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(body, &one); err == nil && strings.TrimSpace(one.Message) != "" {
+		return strings.TrimSpace(one.Message)
+	}
+	var many struct {
+		Message []string `json:"message"`
+	}
+	if err := json.Unmarshal(body, &many); err == nil && len(many.Message) > 0 {
+		return strings.TrimSpace(strings.Join(many.Message, "; "))
+	}
+	return ""
 }
