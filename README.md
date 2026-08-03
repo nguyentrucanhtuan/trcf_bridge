@@ -4,7 +4,7 @@ Chương trình nhỏ chạy nền trên **máy tại quầy**, ngoài Docker. N
 
 PRD: [`prd-46-print-agent-2026-08-02`](../_bmad-output/planning-artifacts/prds/prd-46-print-agent-2026-08-02/prd.md) · Nền nghiên cứu: [báo cáo kỹ thuật](../_bmad-output/planning-artifacts/research/technical-in-hoa-don-may-in-nhiet-usb-docker-research-2026-08-02.md)
 
-**Trạng thái:** Linux xong (`list` / `test` / `pair` / `run`). Windows là đợt sau. Chưa nối được với ERP vì backend chưa có endpoint `/print-agent/*` — nhưng `list` và `test` **dùng được ngay** để kiểm tra máy in thật.
+**Trạng thái:** Linux xong (`list` / `test` / `pair` / `run`), đã nối được với ERP (backend 047-B) và một máy tính cầm được nhiều máy in (047-D). Windows là đợt sau. `list` và `test` chạy được **không cần ERP**, để kiểm tra máy in thật ngay lúc lắp.
 
 ## Nguyên tắc: agent phải ngu
 
@@ -67,6 +67,15 @@ Thiếu cờ nào nó hỏi ngay tại chỗ. Nó **in thử trước khi ghép*
 
 Xong thì tự lưu `/etc/trcf-print-agent/config.json` (quyền 600 vì chứa token) và cài dịch vụ nền.
 
+**Máy tính cắm nhiều máy in** thì chạy `pair` thêm lần nữa với mã của máy in kia:
+
+```bash
+sudo trcf-print-agent pair --server http://192.168.1.50 --code 654321 --device /dev/usb/lp1
+sudo systemctl restart trcf-print-agent
+```
+
+Lần thứ hai **không** đẻ ra token mới: agent gửi kèm token đang có, ERP gắn thêm máy in vào chính máy quầy này. Vẫn **một** tiến trình, **một** dịch vụ nền, **một** tệp cấu hình cho tất cả máy in.
+
 ### 4. Chạy nền
 
 `pair` đã cài systemd unit rồi. Xem nhật ký:
@@ -107,7 +116,7 @@ sudo trcf-print-agent pair --server http://192.168.1.50 --code 123456 \
 cmd/agent/           4 lệnh: list · test · pair · run
 internal/printer/    interface Write([]byte) — 3 cài đặt: usb_linux · net · stub
 internal/escpos/     trang in thử + cắt giấy + đá két (KHÔNG dựng bill)
-internal/config/     config.json (server_url, token, printer, drawer_pin)
+internal/config/     config.json (server_url, token, printers[], drawer_pin)
 internal/transport/  long-poll + báo kết quả + heartbeat
 internal/pair/       đổi mã 6 số lấy token
 internal/service/    cài systemd unit
@@ -136,10 +145,12 @@ Agent **gọi ra**, ERP không gọi vào → máy quầy không mở cổng, kh
 
 ```
 POST /print-agent/pair                  {code, hostname, os, printer_desc, version}
-                                        → {token, printer_id, printer_name}
-GET  /print-agent/jobs/next?wait=25     → 200 {job_id, format, data(base64)} | 204
+     [Authorization: Bearer <token cũ>]  → {token, printer_id, printer_name}
+     ↑ gửi kèm token đang có = GẮN THÊM máy in vào máy quầy này, trả lại token cũ
+GET  /print-agent/jobs/next?wait=25     → 200 {job_id, printer_id, format, data(base64)} | 204
 POST /print-agent/jobs/{id}/result      {ok, error?}
-POST /print-agent/heartbeat             {version, port_ok, last_err}     mỗi 30s
+POST /print-agent/heartbeat             {version, printers:[{printer_id, port_ok, last_err}]}
+                                          mỗi 30s
 ```
 
 Cần thêm route `/print-agent/*` → backend trong Caddyfile của [`trcf_deploy`](../trcf_deploy/Caddyfile).

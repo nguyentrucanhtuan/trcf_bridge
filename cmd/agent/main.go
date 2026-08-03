@@ -261,6 +261,29 @@ func cmdPair(args []string) error {
 	}
 	fmt.Println("✓ Máy in nhận lệnh.")
 
+	// Máy này đã ghép lần nào chưa. Có rồi thì gửi kèm token cũ để ERP GẮN THÊM
+	// máy in vào chính máy quầy đó, thay vì đẻ ra một máy quầy thứ hai với token
+	// riêng — tức là quay về đúng mô hình cũ mà không ai nhận ra, vì vẫn in được.
+	//
+	// Phân biệt "chưa có tệp" với "tệp có mà đọc không xong": dựng Config rỗng cho
+	// MỌI lỗi sẽ vứt sạch token và danh sách máy in đã ghép chỉ vì một trường thiếu
+	// (ai đó sửa tay, hoặc mất điện lúc ghi). Các máy in kia vẫn còn liên kết bên ERP
+	// nhưng biến mất khỏi cấu hình ở đây — chúng lặng lẽ ngừng in mà màn hình vẫn xanh.
+	cfg, err := config.LoadForPairing(*cfgPath)
+	if err != nil {
+		return err
+	}
+
+	// Thử ghi được cấu hình TRƯỚC khi gọi ERP.
+	//
+	// `pair` nay đổi được chủ của một máy in (ON CONFLICT chuyển `agent_id`). Nếu gọi
+	// ERP xong mới phát hiện không ghi nổi `/etc` vì quên `sudo`, thì bên ERP máy in
+	// đã chuyển sang máy quầy này rồi mà máy này lại không có token để chạy — máy in
+	// đang in tốt bỗng thuộc về một agent không tồn tại và ngừng in trong im lặng.
+	if err := config.CheckWritable(*cfgPath); err != nil {
+		return err
+	}
+
 	host, _ := os.Hostname()
 	res, err := pair.Do(context.Background(), *server, pair.Request{
 		Code:        strings.TrimSpace(*code),
@@ -268,23 +291,29 @@ func cmdPair(args []string) error {
 		OS:          "linux",
 		PrinterDesc: target.Target,
 		Version:     version,
-	})
+	}, cfg.Token)
 	if err != nil {
 		return err
 	}
 
-	cfg := &config.Config{
-		ServerURL: strings.TrimRight(*server, "/"),
-		Token:     res.Token,
-		PrinterID: res.PrinterID,
-		Printer:   target,
-		DrawerPin: *drawerPin,
+	cfg.ServerURL = strings.TrimRight(*server, "/")
+	cfg.Token = res.Token
+	// CHỈ ghi đè chân đá két khi người lắp thật sự gõ cờ. Ghi đè vô điều kiện thì
+	// quán dùng két chân 5 (`--drawer-pin 1`) sẽ mất chức năng mở két ngay lúc ghép
+	// THÊM máy in bếp — vì lệnh ghép thêm không ai gõ lại cờ đó. Triệu chứng là "két
+	// tự dưng không bật", không đời nào ai lần ra được nguyên nhân là máy in bếp.
+	if drawerPinSet(fs) {
+		cfg.DrawerPin = *drawerPin
 	}
+	cfg.Upsert(config.Binding{PrinterID: res.PrinterID, Printer: target})
 	if err := config.Save(*cfgPath, cfg); err != nil {
 		return err
 	}
 	fmt.Printf("✓ Đã ghép với máy in \"%s\" (id %d). Cấu hình: %s\n",
 		res.PrinterName, res.PrinterID, *cfgPath)
+	if len(cfg.Printers) > 1 {
+		fmt.Printf("  Máy này đang cầm %d máy in — vẫn chỉ một dịch vụ nền.\n", len(cfg.Printers))
+	}
 
 	if *noService {
 		fmt.Println("Bỏ qua cài dịch vụ (--no-service). Chạy tay:  trcf-print-agent run")
@@ -300,6 +329,20 @@ func cmdPair(args []string) error {
 	fmt.Println("✓ Đã cài dịch vụ nền (tự chạy lại khi khởi động máy).")
 	fmt.Println("  Xem nhật ký:  journalctl -u trcf-print-agent -f")
 	return nil
+}
+
+// drawerPinSet cho biết người dùng có gõ `--drawer-pin` hay không.
+//
+// `flag` không phân biệt "không gõ" với "gõ đúng giá trị mặc định", nên phải hỏi
+// bộ cờ xem nó đã được đặt chưa.
+func drawerPinSet(fs *flag.FlagSet) bool {
+	set := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "drawer-pin" {
+			set = true
+		}
+	})
+	return set
 }
 
 func prompt(label string) string {
@@ -333,9 +376,23 @@ func cmdRun(args []string) error {
 		return err
 	}
 
-	p, err := printer.Open(cfg.Printer)
-	if err != nil {
-		return err
+	// Mở TẤT CẢ máy in ngay từ đầu, tra theo id khi có việc. `Open` cố ý không
+	// kiểm tra thiết bị có tồn tại hay không (xem `openUSB`), nên một máy in đang
+	// tắt cũng không cản agent khởi động — lỗi sẽ hiện ra ở từng lần in.
+	//
+	// Một mục cấu hình sai (gõ nhầm đường dẫn máy in tem) KHÔNG được làm cả quầy
+	// không in được gì: ghi lại rồi đi tiếp, chỉ bỏ cuộc khi không mở nổi máy nào.
+	printers := make(map[int]printer.Printer, len(cfg.Printers))
+	for _, b := range cfg.Printers {
+		p, err := printer.Open(b.Printer)
+		if err != nil {
+			logf("BỎ QUA máy in id %d (%s): %v", b.PrinterID, b.Printer.Target, err)
+			continue
+		}
+		printers[b.PrinterID] = p
+	}
+	if len(printers) == 0 {
+		return fmt.Errorf("không mở được máy in nào trong cấu hình — chạy `list` để xem thiết bị đang cắm")
 	}
 	client := transport.New(cfg.ServerURL, cfg.Token, version)
 
@@ -344,9 +401,26 @@ func cmdRun(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	logf("khởi động %s — ERP %s, máy in %s (id %d)", version, cfg.ServerURL, cfg.Printer.Target, cfg.PrinterID)
+	logf("khởi động %s — ERP %s, %d máy in", version, cfg.ServerURL, len(cfg.Printers))
+	for _, b := range cfg.Printers {
+		logf("  máy in id %d → %s", b.PrinterID, b.Printer.Target)
+	}
 
-	go heartbeatLoop(ctx, client, p, cfg)
+	// MỖI máy in một thợ riêng. Đây là điểm đánh đổi nặng nhất khi gộp nhiều máy in
+	// vào một tiến trình: `Write` của device node USB có thể TREO VÔ HẠN (máy in kẹt
+	// giấy, và `SetWriteDeadline` bị usblp bỏ qua — xem `usb_linux.go`). Nếu vòng lặp
+	// chính tự ghi thì một máy in bếp kẹt giấy sẽ chặn luôn việc in bill cho khách
+	// đang đứng đợi. Mô hình cũ không có rủi ro này vì mỗi máy in một tiến trình.
+	workers := make(map[int]chan *transport.Job, len(printers))
+	for id, p := range printers {
+		// Đệm để vòng lặp chính không phải chờ thợ; đầy hàng nghĩa là máy in đó
+		// đang tắc thật, và lúc đó báo hỏng còn hơn giữ việc im lặng.
+		ch := make(chan *transport.Job, 16)
+		workers[id] = ch
+		go printerWorker(ctx, client, p, id, ch)
+	}
+
+	go heartbeatLoop(ctx, client, printers, cfg)
 
 	backoff := backoffMin
 	for {
@@ -358,7 +432,7 @@ func cmdRun(args []string) error {
 		job, err := client.NextJob(ctx)
 		switch {
 		case err == nil:
-			handleJob(ctx, client, p, job)
+			dispatchJob(ctx, client, workers, job)
 			backoff = backoffMin // gọi được ERP = mạng lành, reset chờ
 			continue
 		case errors.Is(err, transport.ErrNoJob):
@@ -383,28 +457,84 @@ func cmdRun(args []string) error {
 // Điểm cốt yếu: lỗi in KHÔNG làm agent chết và KHÔNG bị nuốt — nó được BÁO
 // NGƯỢC về ERP để hiện ở quầy (PRD FR-047.9/.16). Máy in hết giấy thì nhân viên
 // phải thấy, chứ không phải phiếu lặng lẽ biến mất.
-func handleJob(ctx context.Context, client *transport.Client, p printer.Printer, job *transport.Job) {
-	payload, err := job.Payload()
-	if err == nil {
-		logf("job %d: in %d byte", job.ID, len(payload))
-		err = p.Write(payload)
+func dispatchJob(
+	ctx context.Context,
+	client *transport.Client,
+	workers map[int]chan *transport.Job,
+	job *transport.Job,
+) {
+	// Máy in vừa bị gỡ ở ERP nhưng lệnh cũ còn trong hàng đợi. Báo hỏng chứ KHÔNG
+	// im lặng bỏ qua: im lặng thì job nằm `sent` tới khi bị thu hồi rồi giao lại,
+	// lặp vô hạn mà không ai thấy lý do. Ghép lại rồi khởi động lại là xong.
+	ch, ok := workers[job.PrinterID]
+	if !ok {
+		reportErr(ctx, client, job.ID, fmt.Errorf(
+			"máy tính này không cầm máy in id %d — chạy `pair` lại rồi khởi động lại dịch vụ",
+			job.PrinterID))
+		return
 	}
 
-	if err != nil {
-		logf("job %d: LỖI %v", job.ID, err)
-	} else {
-		logf("job %d: xong", job.ID)
-	}
-
-	if rerr := client.ReportResult(ctx, job.ID, err); rerr != nil {
-		// In được mà báo không được là tình huống xấu: ERP tưởng hỏng và sẽ cho
-		// in lại → ra hai tờ. Ghi rõ để còn lần theo khi có khiếu nại.
-		logf("job %d: KHÔNG báo được kết quả về ERP: %v", job.ID, rerr)
+	// Gửi KHÔNG chờ. Hàng đầy nghĩa là máy in đó đang tắc thật (kẹt giấy, treo giữa
+	// lần ghi) — báo hỏng để ERP tính lượt thử lại, còn hơn chặn vòng lặp và kéo theo
+	// mọi máy in khác.
+	select {
+	case ch <- job:
+	default:
+		reportErr(ctx, client, job.ID, fmt.Errorf(
+			"máy in id %d đang tắc, hàng đợi tại quầy đã đầy — kiểm tra giấy và dây",
+			job.PrinterID))
 	}
 }
 
-// heartbeatLoop báo agent còn sống + cổng máy in có mở được không.
-func heartbeatLoop(ctx context.Context, client *transport.Client, p printer.Printer, cfg *config.Config) {
+// printerWorker in tuần tự cho ĐÚNG MỘT máy in.
+//
+// Tuần tự trong phạm vi một máy in là cố ý: hai tờ bill chen nhau vào cùng device
+// node cho ra một tờ ký tự rác. Nhưng giữa các máy in thì độc lập hoàn toàn.
+func printerWorker(
+	ctx context.Context,
+	client *transport.Client,
+	p printer.Printer,
+	printerID int,
+	jobs <-chan *transport.Job,
+) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case job := <-jobs:
+			payload, err := job.Payload()
+			if err == nil {
+				logf("job %d: in %d byte ra máy in id %d", job.ID, len(payload), printerID)
+				err = p.Write(payload)
+			}
+			if err != nil {
+				logf("job %d: LỖI %v", job.ID, err)
+			} else {
+				logf("job %d: xong", job.ID)
+			}
+			if rerr := client.ReportResult(ctx, job.ID, err); rerr != nil {
+				// In được mà báo không được là tình huống xấu: ERP tưởng hỏng và sẽ
+				// cho in lại → ra hai tờ. Ghi rõ để còn lần theo khi có khiếu nại.
+				logf("job %d: KHÔNG báo được kết quả về ERP: %v", job.ID, rerr)
+			}
+		}
+	}
+}
+
+func reportErr(ctx context.Context, client *transport.Client, jobID int64, cause error) {
+	logf("job %d: %v", jobID, cause)
+	if rerr := client.ReportResult(ctx, jobID, cause); rerr != nil {
+		logf("job %d: KHÔNG báo được kết quả về ERP: %v", jobID, rerr)
+	}
+}
+
+// heartbeatLoop báo máy quầy còn sống + thăm cổng TỪNG máy in.
+func heartbeatLoop(
+	ctx context.Context,
+	client *transport.Client,
+	printers map[int]printer.Printer,
+	cfg *config.Config,
+) {
 	t := time.NewTicker(heartbeatEvery)
 	defer t.Stop()
 	for {
@@ -412,14 +542,24 @@ func heartbeatLoop(ctx context.Context, client *transport.Client, p printer.Prin
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			// Gửi buffer RỖNG để thăm cổng: mở được device/kết nối được TCP là
-			// máy in sống, mà không tốn một milimet giấy nào.
-			portErr := p.Write(nil)
-			msg := ""
-			if portErr != nil {
-				msg = portErr.Error()
+			// Đi theo thứ tự trong cấu hình chứ không duyệt map: map trong Go trả
+			// thứ tự ngẫu nhiên, mà nhật ký đọc dễ hơn khi thứ tự cố định.
+			status := make([]transport.PrinterStatus, 0, len(cfg.Printers))
+			for _, b := range cfg.Printers {
+				p, ok := printers[b.PrinterID]
+				if !ok {
+					continue
+				}
+				// Gửi buffer RỖNG để thăm cổng: mở được device/kết nối được TCP là
+				// máy in sống, mà không tốn một milimet giấy nào.
+				portErr := p.Write(nil)
+				s := transport.PrinterStatus{PrinterID: b.PrinterID, PortOK: portErr == nil}
+				if portErr != nil {
+					s.LastErr = portErr.Error()
+				}
+				status = append(status, s)
 			}
-			if err := client.Heartbeat(ctx, portErr == nil, msg); err != nil {
+			if err := client.Heartbeat(ctx, status); err != nil {
 				logf("heartbeat lỗi: %v", err)
 			}
 		}

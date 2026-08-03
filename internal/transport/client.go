@@ -28,9 +28,12 @@ const pollTimeout = PollWait + 10*time.Second
 
 // Job — một lần in.
 type Job struct {
-	ID     int64  `json:"job_id"`
-	Format string `json:"format"` // hiện chỉ "escpos"
-	Data   string `json:"data"`   // base64 của byte ĐÃ DỰNG SẴN ở backend
+	ID int64 `json:"job_id"`
+	// PrinterID — máy in nào phải nhận. Máy quầy cầm nhiều máy in nên đây là thứ
+	// duy nhất phân biệt tờ bill với phiếu bếp.
+	PrinterID int    `json:"printer_id"`
+	Format    string `json:"format"` // hiện chỉ "escpos"
+	Data      string `json:"data"`   // base64 của byte ĐÃ DỰNG SẴN ở backend
 }
 
 // Payload giải mã data. Agent chỉ giải base64 — KHÔNG diễn giải nội dung.
@@ -42,7 +45,14 @@ func (j Job) Payload() ([]byte, error) {
 	return b, nil
 }
 
-// Client — một agent, một máy in, một token.
+// PrinterStatus — trạng thái cổng của một máy in, gửi kèm heartbeat.
+type PrinterStatus struct {
+	PrinterID int    `json:"printer_id"`
+	PortOK    bool   `json:"port_ok"`
+	LastErr   string `json:"last_err,omitempty"`
+}
+
+// Client — một agent (một MÁY TÍNH), nhiều máy in, một token.
 type Client struct {
 	baseURL string
 	token   string
@@ -133,13 +143,16 @@ func (c *Client) ReportResult(ctx context.Context, jobID int64, printErr error) 
 	return nil
 }
 
-// Heartbeat cho ERP biết agent còn sống — nguồn dữ liệu cho cột trạng thái máy
-// in ở màn `/printers` (PRD FR-047.14).
-func (c *Client) Heartbeat(ctx context.Context, portOK bool, lastErr string) error {
+// Heartbeat cho ERP biết máy quầy còn sống và TỪNG máy in có mở cổng được không
+// — nguồn dữ liệu cho cột trạng thái ở màn `/printers` (PRD FR-047.14).
+//
+// Gửi cả danh sách thay vì một cờ chung: các máy in trên cùng một máy tính hỏng
+// độc lập, gộp lại thì rút dây máy in bếp sẽ kéo máy in bill báo đỏ theo và nhân
+// viên đi kiểm nhầm chỗ.
+func (c *Client) Heartbeat(ctx context.Context, printers []PrinterStatus) error {
 	b, _ := json.Marshal(map[string]any{
 		"version":  c.version,
-		"port_ok":  portOK,
-		"last_err": lastErr,
+		"printers": printers,
 	})
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/print-agent/heartbeat", bytes.NewReader(b))

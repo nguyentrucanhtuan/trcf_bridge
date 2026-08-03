@@ -35,8 +35,14 @@ type Request struct {
 	Version     string `json:"version"`
 }
 
-// Do gọi ERP đổi mã lấy token.
-func Do(ctx context.Context, baseURL string, req Request) (*Result, error) {
+// Do gọi ERP đổi mã lấy quyền in cho một máy in.
+//
+// `existingToken` là token đang có trong cấu hình của máy này, để trống nếu chưa
+// ghép lần nào. Gửi kèm thì ERP GẮN THÊM máy in vào chính máy quầy đó và trả lại
+// đúng token cũ — nhờ vậy một máy tính cầm 2–3 máy in mà vẫn chỉ một tiến trình,
+// một dịch vụ nền, một tệp cấu hình. Token sai hoặc đã bị thu hồi thì ERP dựng
+// máy quầy mới, không báo lỗi: người lắp không có cách nào tự gỡ nếu bị từ chối.
+func Do(ctx context.Context, baseURL string, req Request, existingToken string) (*Result, error) {
 	b, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
@@ -49,6 +55,9 @@ func Do(ctx context.Context, baseURL string, req Request) (*Result, error) {
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("User-Agent", "trcf-print-agent/"+req.Version)
+	if existingToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+existingToken)
+	}
 
 	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(httpReq)
 	if err != nil {
