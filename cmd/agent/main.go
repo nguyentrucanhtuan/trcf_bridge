@@ -319,6 +319,14 @@ func cmdPair(args []string) error {
 		fmt.Println("Bỏ qua cài dịch vụ (--no-service). Chạy tay:  trcf-print-agent run")
 		return nil
 	}
+	// Trong container thì KHÔNG có systemd, và cũng không cần: `restart: unless-stopped`
+	// của Docker làm đúng việc tự chạy lại. Không nhận ra chỗ này thì người lắp thấy
+	// dòng "⚠ Chưa cài được dịch vụ nền" ngay sau khi ghép THÀNH CÔNG — đọc như hỏng.
+	if service.InContainer() {
+		fmt.Println("Đang chạy trong container — không cài dịch vụ nền (Docker tự chạy lại).")
+		fmt.Println("  Bật lên bằng:  docker compose up -d")
+		return nil
+	}
 	if err := service.Install(); err != nil {
 		// Ghép nối ĐÃ xong và cấu hình đã lưu — cài dịch vụ hỏng không được xoá
 		// công đó, chỉ báo để chạy tay.

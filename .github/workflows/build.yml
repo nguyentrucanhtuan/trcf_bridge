@@ -93,13 +93,21 @@ jobs:
             type=ref,event=tag
             type=sha,format=short
 
+      # Nhãn phiên bản phải TRUY NGƯỢC ĐƯỢC ra mã nguồn. Bản gắn thẻ thì lấy tên thẻ;
+      # bản đẩy thẳng `main` mà cũng để "main" thì lúc đi chữa máy in ở quán, `version`
+      # chỉ nói được "đang chạy main" — không biết là main của tuần nào.
+      - id: ver
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then echo "v=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          else echo "v=main-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"; fi
+
       # arm64 cho mini-PC ARM ở quầy — cùng lý do bản binary build hai kiến trúc.
       - uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          build-args: VERSION=${{ github.ref_name }}
+          build-args: VERSION=${{ steps.ver.outputs.v }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
