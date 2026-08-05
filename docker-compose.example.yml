@@ -1,0 +1,40 @@
+# Chạy chương trình in bằng Docker — CHỈ TRÊN LINUX (xem đầu Dockerfile).
+#
+# Chép tệp này ra `docker-compose.yml` rồi sửa đúng hai chỗ: đường dẫn thiết bị máy in,
+# và địa chỉ ERP nếu backend không nằm cùng máy.
+#
+#   docker compose run --rm print-agent pair --server http://localhost --code 123456 --no-service
+#   docker compose up -d
+#
+# Bước `pair` phải chạy TRƯỚC và chỉ một lần cho mỗi máy in — nó xin token rồi ghi vào
+# `/etc/trcf-print-agent`. `--no-service` là BẮT BUỘC trong container: không có systemd
+# để cài dịch vụ nền, và cũng không cần — `restart: unless-stopped` làm đúng việc đó.
+
+services:
+  print-agent:
+    build: .
+    # Hoặc dùng ảnh dựng sẵn nếu quán không có mã nguồn:
+    # image: trcf-print-agent:local
+    container_name: trcf-print-agent
+    restart: unless-stopped
+
+    # Dùng chung mạng với máy thật để gọi được `http://localhost` (Caddy cổng 80).
+    # Không có dòng này thì `localhost` trỏ vào chính container và không ai trả lời.
+    network_mode: host
+
+    devices:
+      # ⚠️ SỬA CHO ĐÚNG MÁY. Số `lpN` KHÔNG cố định: rút cắm lại dây hay khởi động máy
+      # là nó nhảy (một quán thật đã thấy `lp4` thay vì `lp0`). Xem bằng `ls /dev/usb/`.
+      # Cắm hai máy in thì khai hai dòng.
+      - "/dev/usb/lp0:/dev/usb/lp0"
+
+    volumes:
+      # Token + bản đồ máy in. Xoá là phải ghép lại bằng mã mới.
+      - /etc/trcf-print-agent:/etc/trcf-print-agent
+
+    # Máy in USB có thể mất vài giây mới sẵn sàng sau khi máy khởi động.
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/trcf-print-agent", "version"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
