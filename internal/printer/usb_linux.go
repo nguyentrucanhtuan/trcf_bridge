@@ -4,8 +4,7 @@ package printer
 
 import (
 	"fmt"
-	"os"
-	"time"
+	"syscall"
 )
 
 // usbPrinter ghi ESC/POS THẲNG vào device node của nhân Linux (`usblp`),
@@ -26,28 +25,77 @@ type usbPrinter struct {
 // chết mà không báo lỗi rõ; mở lại mỗi lần thì lần in kế tiếp tự nhận device
 // mới. Bill in mỗi vài phút nên chi phí mở file là không đáng kể.
 func (p *usbPrinter) Write(b []byte) error {
-	// O_WRONLY thuần — không O_CREATE: nếu device không tồn tại thì phải BÁO LỖI,
-	// tuyệt đối không được tạo ra một file thường cùng tên rồi "in" vào đó và
-	// tưởng là thành công (hỏng im lặng — thứ PRD §7 cấm).
-	f, err := os.OpenFile(p.path, os.O_WRONLY, 0)
+	dev, err := openDevice(p.path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("không thấy máy in tại %s — kiểm tra dây USB và nguồn máy in", p.path)
-		}
-		if os.IsPermission(err) {
-			return fmt.Errorf("không có quyền ghi vào %s — thêm tài khoản chạy agent vào nhóm 'lp' hoặc cài udev rule (xem README)", p.path)
-		}
-		return fmt.Errorf("mở %s: %w", p.path, err)
+		return err
 	}
-	defer f.Close()
-
-	if err := f.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
-		// Một số device node không nhận deadline — không sao, ghi tiếp không
-		// deadline còn hơn là bỏ cả lần in.
-		_ = err
-	}
-
-	return writeAll(f, b, p.path)
+	return writeUSB(dev, b, p.path)
 }
 
 func (p *usbPrinter) String() string { return "usb:" + p.path }
+
+// rawDevice — thiết bị mở bằng SYSCALL THÔ, cố ý KHÔNG dùng `os.File`.
+//
+// ─────────────────────────────────────────────────────────────────────────
+// ĐÂY LÀ CHỖ ĐÃ LÀM MẤT BILL — đo bằng strace tại quán 2026-08-06:
+//
+//	openat("/dev/usb/lp4", O_WRONLY|O_CLOEXEC) = 3
+//	fcntl(3, F_SETFL, O_WRONLY|O_NONBLOCK|O_LARGEFILE) = 0   ← Go tự bật
+//	write(3, ..., 466) = 466
+//	close(3)
+//
+// `os.OpenFile` đăng ký fd vào bộ theo dõi sự kiện của Go runtime, và bước đó
+// BẬT O_NONBLOCK. Device node là thiết bị ký tự nên Go coi là "theo dõi được"
+// → luôn bật, KHÔNG cần ai gọi SetWriteDeadline (bản vá đầu tiên gỡ deadline
+// mà vẫn hỏng y nguyên chính vì hiểu nhầm chỗ này).
+//
+// Với `usblp`, non-blocking đổi hẳn ngữ nghĩa write(): nó trả về NGAY khi byte
+// vừa được xếp vào hàng đợi USB, CHƯA chạy qua dây. `close()` ngay sau đó gọi
+// `usblp_release()` → huỷ các URB dang dở → phần đuôi bill BIẾN MẤT.
+//
+// Triệu chứng ở quán: bill và tờ in thử đều chỉ ra 2 dòng đầu, không có lệnh
+// cắt, mà agent vẫn báo "đã in xong" — hỏng im lặng đúng nghĩa. Ghi cùng bộ
+// byte đó bằng Python (fd chặn) thì ra đủ.
+//
+// Syscall thô giữ fd ở chế độ CHẶN: write() chỉ trả về sau khi dữ liệu đã thực
+// sự đi qua cổng USB, nên lúc đóng không còn gì để mất.
+// ─────────────────────────────────────────────────────────────────────────
+type rawDevice struct {
+	fd   int
+	path string
+}
+
+func openDevice(path string) (*rawDevice, error) {
+	// KHÔNG O_CREAT: device không tồn tại thì phải BÁO LỖI, tuyệt đối không được
+	// tạo ra một file thường cùng tên rồi "in" vào đó và tưởng là thành công.
+	// KHÔNG O_NONBLOCK: xem khối chú thích trên.
+	fd, err := syscall.Open(path, syscall.O_WRONLY|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		switch err {
+		case syscall.ENOENT:
+			return nil, fmt.Errorf("không thấy máy in tại %s — kiểm tra dây USB và nguồn máy in", path)
+		case syscall.EACCES, syscall.EPERM:
+			return nil, fmt.Errorf("không có quyền ghi vào %s — thêm tài khoản chạy agent vào nhóm 'lp' hoặc cài udev rule (xem README)", path)
+		case syscall.EBUSY:
+			return nil, fmt.Errorf("máy in %s đang bị chương trình khác giữ — thường là CUPS; xem README mục gỡ CUPS", path)
+		}
+		return nil, fmt.Errorf("mở %s: %w", path, err)
+	}
+	return &rawDevice{fd: fd, path: path}, nil
+}
+
+func (d *rawDevice) Write(p []byte) (int, error) {
+	for {
+		n, err := syscall.Write(d.fd, p)
+		if err == syscall.EINTR {
+			// Bị tín hiệu cắt ngang giữa chừng — thử lại, không coi là lỗi in.
+			continue
+		}
+		if err != nil {
+			return 0, err
+		}
+		return n, nil
+	}
+}
+
+func (d *rawDevice) Close() error { return syscall.Close(d.fd) }
