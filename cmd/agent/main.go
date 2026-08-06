@@ -1,4 +1,4 @@
-// Command trcf-print-agent — in bill/phiếu bếp cho TRCF ERP.
+// Command trcf-bridge — in bill/phiếu bếp cho TRCF ERP.
 //
 // Bốn lệnh, theo đúng thứ tự người lắp đặt dùng:
 //
@@ -23,12 +23,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/nguyentrucanhtuan/trcf_print_agent/internal/config"
-	"github.com/nguyentrucanhtuan/trcf_print_agent/internal/escpos"
-	"github.com/nguyentrucanhtuan/trcf_print_agent/internal/pair"
-	"github.com/nguyentrucanhtuan/trcf_print_agent/internal/printer"
-	"github.com/nguyentrucanhtuan/trcf_print_agent/internal/service"
-	"github.com/nguyentrucanhtuan/trcf_print_agent/internal/transport"
+	"github.com/nguyentrucanhtuan/trcf_bridge/internal/config"
+	"github.com/nguyentrucanhtuan/trcf_bridge/internal/escpos"
+	"github.com/nguyentrucanhtuan/trcf_bridge/internal/pair"
+	"github.com/nguyentrucanhtuan/trcf_bridge/internal/printer"
+	"github.com/nguyentrucanhtuan/trcf_bridge/internal/service"
+	"github.com/nguyentrucanhtuan/trcf_bridge/internal/transport"
 )
 
 // version — do build gắn: -ldflags "-X main.version=v0.1.0"
@@ -51,7 +51,7 @@ func main() {
 	case "run":
 		err = cmdRun(os.Args[2:])
 	case "version", "-v", "--version":
-		fmt.Println("trcf-print-agent", version)
+		fmt.Println("trcf-bridge", version)
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -67,19 +67,19 @@ func main() {
 }
 
 func usage() {
-	fmt.Print(`trcf-print-agent — in bill/phiếu bếp cho TRCF ERP
+	fmt.Print(`trcf-bridge — in bill/phiếu bếp cho TRCF ERP
 
-  trcf-print-agent list
+  trcf-bridge list
       Xem máy in USB nào đang cắm vào máy này.
 
-  trcf-print-agent test [--device /dev/usb/lp0] [--net 192.168.1.60:9100] [--drawer]
+  trcf-bridge test [--device /dev/usb/lp0] [--net 192.168.1.60:9100] [--drawer]
       In thử một tờ và (nếu có --drawer) đá ngăn kéo tiền.
       Không cần ERP, không cần ghép nối.
 
-  trcf-print-agent pair --server http://192.168.1.50 --code 123456 [--device ...]
+  trcf-bridge pair --server http://192.168.1.50 --code 123456 [--device ...]
       Ghép với ERP, lưu cấu hình, cài dịch vụ chạy nền, in tờ xác nhận.
 
-  trcf-print-agent run [--config /etc/trcf-print-agent/config.json]
+  trcf-bridge run [--config /etc/trcf-bridge/config.json]
       Vòng lặp chính. Dịch vụ nền gọi lệnh này.
 `)
 }
@@ -112,7 +112,7 @@ func cmdList() error {
 		}
 	}
 	fmt.Println()
-	fmt.Println("In thử:  trcf-print-agent test --device", found[0].Path)
+	fmt.Println("In thử:  trcf-bridge test --device", found[0].Path)
 
 	// Nhiều hơn một máy in thì tên /dev/usb/lpN có thể HOÁN ĐỔI sau khi khởi
 	// động lại — nhắc ngay tại đây, vì lúc đó người lắp đang có đủ thông tin
@@ -201,7 +201,7 @@ func resolveTarget(device, netAddr string) (printer.Config, error) {
 	}
 	switch len(found) {
 	case 0:
-		return printer.Config{}, errors.New("không thấy máy in USB nào — chạy `trcf-print-agent list` để chẩn đoán, hoặc dùng --net cho máy in mạng")
+		return printer.Config{}, errors.New("không thấy máy in USB nào — chạy `trcf-bridge list` để chẩn đoán, hoặc dùng --net cho máy in mạng")
 	case 1:
 		fmt.Printf("Tự chọn máy in duy nhất: %s\n", found[0].Label())
 		return printer.Config{Kind: printer.KindUSB, Target: found[0].Path}, nil
@@ -316,7 +316,7 @@ func cmdPair(args []string) error {
 	}
 
 	if *noService {
-		fmt.Println("Bỏ qua cài dịch vụ (--no-service). Chạy tay:  trcf-print-agent run")
+		fmt.Println("Bỏ qua cài dịch vụ (--no-service). Chạy tay:  trcf-bridge run")
 		return nil
 	}
 	// Trong container thì KHÔNG có systemd, và cũng không cần: `restart: unless-stopped`
@@ -331,11 +331,11 @@ func cmdPair(args []string) error {
 		// Ghép nối ĐÃ xong và cấu hình đã lưu — cài dịch vụ hỏng không được xoá
 		// công đó, chỉ báo để chạy tay.
 		fmt.Fprintln(os.Stderr, "⚠ Chưa cài được dịch vụ nền:", err)
-		fmt.Fprintln(os.Stderr, "  Cấu hình vẫn đã lưu. Chạy tay:  trcf-print-agent run")
+		fmt.Fprintln(os.Stderr, "  Cấu hình vẫn đã lưu. Chạy tay:  trcf-bridge run")
 		return nil
 	}
 	fmt.Println("✓ Đã cài dịch vụ nền (tự chạy lại khi khởi động máy).")
-	fmt.Println("  Xem nhật ký:  journalctl -u trcf-print-agent -f")
+	fmt.Println("  Xem nhật ký:  journalctl -u trcf-bridge -f")
 	return nil
 }
 

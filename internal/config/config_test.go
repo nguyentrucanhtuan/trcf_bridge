@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/nguyentrucanhtuan/trcf_print_agent/internal/printer"
+	"github.com/nguyentrucanhtuan/trcf_bridge/internal/printer"
 )
 
 func usb(target string) printer.Config {

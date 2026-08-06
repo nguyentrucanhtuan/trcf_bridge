@@ -18,19 +18,19 @@ COPY internal ./internal
 # ra "dev" — lúc đi chữa máy in ở quán mà không biết đang chạy bản nào thì rất mất công.
 ARG VERSION=dev
 RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
-      -o /out/trcf-print-agent ./cmd/agent
+      -o /out/trcf-bridge ./cmd/agent
 
 # `scratch` cũng đủ (binary tĩnh), nhưng giữ alpine để còn `sh` mà chui vào xem
 # `/dev/usb/lp*` khi máy in không ra giấy — lúc đó thứ cần nhất là mở được vỏ ra xem.
 FROM alpine:3.20
 RUN adduser -D -H trcf
-COPY --from=build /out/trcf-print-agent /usr/local/bin/trcf-print-agent
+COPY --from=build /out/trcf-bridge /usr/local/bin/trcf-bridge
 
-# Cấu hình (token + bản đồ máy in) nằm ngoài ảnh: mount `/etc/trcf-print-agent` vào.
+# Cấu hình (token + bản đồ máy in) nằm ngoài ảnh: mount `/etc/trcf-bridge` vào.
 # Mất tệp này là mất token, phải ghép lại bằng mã mới.
-VOLUME ["/etc/trcf-print-agent"]
+VOLUME ["/etc/trcf-bridge"]
 
 # Chạy dưới root: `/dev/usb/lpN` mặc định là `root:lp 0660`. Muốn hạ quyền thì đổi
 # thành `USER trcf` rồi thêm `group_add: ["lp"]` ở compose.
-ENTRYPOINT ["/usr/local/bin/trcf-print-agent"]
+ENTRYPOINT ["/usr/local/bin/trcf-bridge"]
 CMD ["run"]

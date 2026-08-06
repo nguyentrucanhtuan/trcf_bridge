@@ -3,19 +3,19 @@
 # Chép tệp này ra `docker-compose.yml` rồi sửa đúng hai chỗ: đường dẫn thiết bị máy in,
 # và địa chỉ ERP nếu backend không nằm cùng máy.
 #
-#   docker compose run --rm print-agent pair --server http://localhost --code 123456 --no-service
+#   docker compose run --rm bridge pair --server http://localhost --code 123456 --no-service
 #   docker compose up -d
 #
 # Bước `pair` phải chạy TRƯỚC và chỉ một lần cho mỗi máy in — nó xin token rồi ghi vào
-# `/etc/trcf-print-agent`. `--no-service` là BẮT BUỘC trong container: không có systemd
+# `/etc/trcf-bridge`. `--no-service` là BẮT BUỘC trong container: không có systemd
 # để cài dịch vụ nền, và cũng không cần — `restart: unless-stopped` làm đúng việc đó.
 
 services:
-  print-agent:
+  bridge:
     build: .
     # Hoặc dùng ảnh dựng sẵn nếu quán không có mã nguồn:
-    # image: trcf-print-agent:local
-    container_name: trcf-print-agent
+    # image: trcf-bridge:local
+    container_name: trcf-bridge
     restart: unless-stopped
 
     # Dùng chung mạng với máy thật để gọi được `http://localhost` (Caddy cổng 80).
@@ -30,11 +30,11 @@ services:
 
     volumes:
       # Token + bản đồ máy in. Xoá là phải ghép lại bằng mã mới.
-      - /etc/trcf-print-agent:/etc/trcf-print-agent
+      - /etc/trcf-bridge:/etc/trcf-bridge
 
     # Máy in USB có thể mất vài giây mới sẵn sàng sau khi máy khởi động.
     healthcheck:
-      test: ["CMD", "/usr/local/bin/trcf-print-agent", "version"]
+      test: ["CMD", "/usr/local/bin/trcf-bridge", "version"]
       interval: 60s
       timeout: 5s
       retries: 3

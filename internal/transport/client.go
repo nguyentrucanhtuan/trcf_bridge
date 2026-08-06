@@ -80,7 +80,7 @@ var ErrNoJob = fmt.Errorf("chưa có việc in")
 
 // NextJob chờ việc. Trả ErrNoJob khi hết giờ chờ.
 func (c *Client) NextJob(ctx context.Context) (*Job, error) {
-	url := fmt.Sprintf("%s/print-agent/jobs/next?wait=%d", c.baseURL, int(PollWait.Seconds()))
+	url := fmt.Sprintf("%s/bridge/jobs/next?wait=%d", c.baseURL, int(PollWait.Seconds()))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -123,7 +123,7 @@ func (c *Client) ReportResult(ctx context.Context, jobID int64, printErr error) 
 	}
 	b, _ := json.Marshal(body)
 
-	url := fmt.Sprintf("%s/print-agent/jobs/%d/result", c.baseURL, jobID)
+	url := fmt.Sprintf("%s/bridge/jobs/%d/result", c.baseURL, jobID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(b))
 	if err != nil {
 		return err
@@ -155,7 +155,7 @@ func (c *Client) Heartbeat(ctx context.Context, printers []PrinterStatus) error 
 		"printers": printers,
 	})
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/print-agent/heartbeat", bytes.NewReader(b))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/bridge/heartbeat", bytes.NewReader(b))
 	if err != nil {
 		return err
 	}
@@ -176,7 +176,7 @@ func (c *Client) Heartbeat(ctx context.Context, printers []PrinterStatus) error 
 
 func (c *Client) auth(req *http.Request) {
 	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("User-Agent", "trcf-print-agent/"+c.version)
+	req.Header.Set("User-Agent", "trcf-bridge/"+c.version)
 }
 
 // drain đọc nốt body rồi đóng, để kết nối được tái dùng thay vì bị vứt —

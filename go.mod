@@ -1,3 +1,3 @@
-module github.com/nguyentrucanhtuan/trcf_print_agent
+module github.com/nguyentrucanhtuan/trcf_bridge
 
 go 1.23

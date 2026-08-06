@@ -48,7 +48,7 @@ func Open(cfg Config) (Printer, error) {
 	switch cfg.Kind {
 	case KindUSB:
 		if cfg.Target == "" {
-			return nil, fmt.Errorf("chưa chọn máy in USB — chạy `trcf-print-agent list` để xem máy in đang cắm")
+			return nil, fmt.Errorf("chưa chọn máy in USB — chạy `trcf-bridge list` để xem máy in đang cắm")
 		}
 		return openUSB(cfg.Target)
 	case KindNet:

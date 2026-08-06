@@ -13,7 +13,7 @@ import (
 	"strings"
 )
 
-const unitPath = "/etc/systemd/system/trcf-print-agent.service"
+const unitPath = "/etc/systemd/system/trcf-bridge.service"
 
 // unitTemplate — %s là đường dẫn tuyệt đối tới binary.
 //
@@ -22,8 +22,8 @@ const unitPath = "/etc/systemd/system/trcf-print-agent.service"
 // thì một dịch vụ đơn giản chạy được ngay quan trọng hơn — và agent không mở
 // cổng nghe, không nhận dữ liệu từ bên ngoài, nên bề mặt tấn công rất hẹp.
 const unitTemplate = `[Unit]
-Description=TRCF Print Agent — in bill/phiếu bếp cho TRCF ERP
-Documentation=https://github.com/nguyentrucanhtuan/trcf_print_agent
+Description=TRCF Bridge — cầu nối thiết bị tại quầy cho TRCF ERP
+Documentation=https://github.com/nguyentrucanhtuan/trcf_bridge
 After=network-online.target
 Wants=network-online.target
 
@@ -61,8 +61,8 @@ func Install() error {
 
 	for _, args := range [][]string{
 		{"daemon-reload"},
-		{"enable", "trcf-print-agent"},
-		{"restart", "trcf-print-agent"},
+		{"enable", "trcf-bridge"},
+		{"restart", "trcf-bridge"},
 	} {
 		cmd := exec.Command("systemctl", args...)
 		if out, err := cmd.CombinedOutput(); err != nil {

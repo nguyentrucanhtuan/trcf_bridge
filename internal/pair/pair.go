@@ -48,13 +48,13 @@ func Do(ctx context.Context, baseURL string, req Request, existingToken string) 
 		return nil, err
 	}
 
-	url := strings.TrimRight(baseURL, "/") + "/print-agent/pair"
+	url := strings.TrimRight(baseURL, "/") + "/bridge/pair"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(b))
 	if err != nil {
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("User-Agent", "trcf-print-agent/"+req.Version)
+	httpReq.Header.Set("User-Agent", "trcf-bridge/"+req.Version)
 	if existingToken != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+existingToken)
 	}

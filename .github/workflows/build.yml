@@ -46,7 +46,7 @@ jobs:
           for arch in amd64 arm64; do
             GOOS=linux GOARCH=$arch go build -trimpath \
               -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
-              -o dist/trcf-print-agent-linux-$arch ./cmd/agent
+              -o dist/trcf-bridge-linux-$arch ./cmd/agent
           done
           sha256sum dist/* > dist/SHA256SUMS
 
@@ -71,7 +71,7 @@ jobs:
       contents: read
       packages: write
     env:
-      IMAGE: ghcr.io/nguyentrucanhtuan/trcf-print-agent
+      IMAGE: ghcr.io/nguyentrucanhtuan/trcf-bridge
     steps:
       - uses: actions/checkout@v4
 

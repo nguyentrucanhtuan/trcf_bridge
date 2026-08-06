@@ -7,11 +7,11 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/nguyentrucanhtuan/trcf_print_agent/internal/printer"
+	"github.com/nguyentrucanhtuan/trcf_bridge/internal/printer"
 )
 
 // DefaultPath — nơi đặt config khi chạy như dịch vụ hệ thống trên Linux.
-const DefaultPath = "/etc/trcf-print-agent/config.json"
+const DefaultPath = "/etc/trcf-bridge/config.json"
 
 // Binding — một máy in bên ERP ứng với một thiết bị vật lý ở máy này.
 type Binding struct {
@@ -64,7 +64,7 @@ func Load(path string) (*Config, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("chưa ghép nối máy in (không thấy %s) — chạy `trcf-print-agent pair` trước", path)
+			return nil, fmt.Errorf("chưa ghép nối máy in (không thấy %s) — chạy `trcf-bridge pair` trước", path)
 		}
 		return nil, fmt.Errorf("đọc %s: %w", path, err)
 	}

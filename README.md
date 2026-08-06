@@ -1,12 +1,25 @@
-# TRCF Print Agent
+# TRCF Bridge
 
-Chương trình nhỏ chạy nền trên **máy tại quầy**, ngoài Docker. Nhận byte ESC/POS từ TRCF ERP rồi ghi ra máy in nhiệt (USB hoặc LAN). Cắt giấy và mở ngăn kéo tiền.
+Chương trình nhỏ chạy nền trên **máy tại quầy**, ngoài Docker. Là **cầu nối giữa TRCF ERP và
+các thiết bị vật lý cắm ở quầy**.
+
+Hôm nay nó làm đúng một việc: nhận byte ESC/POS từ ERP rồi ghi ra máy in nhiệt (USB hoặc LAN),
+cắt giấy, mở ngăn kéo tiền. Về sau những thiết bị chỉ với tới được từ trong quán — máy chấm công,
+màn hình khách trên máy tính bảng, cân điện tử — cũng đi qua đây, nhất là khi ERP chuyển lên cloud
+và không còn nằm cùng mạng LAN với thiết bị.
+
+> **Đổi tên (2026-08-06):** trước đây gọi là `trcf_print_agent`, binary `trcf-print-agent`,
+> đường gọi backend `/print-agent/*`. Đổi thành `trcf_bridge` vì tên cũ mô tả *một việc*,
+> trong khi vai của nó là *một chỗ đứng* — thêm loại thiết bị mới thì tên cũ sẽ sai.
+> Đường cũ **đã gỡ hẳn, không giữ lớp tương thích nào**: lúc đổi tên chưa quán nào ghép nối
+> (tất cả đang in qua LAN) nên không có bản cài ngoài kia để đỡ. Script cài vẫn dọn giúp
+> dấu vết bản cũ nếu máy từng cài mà bỏ đó.
 
 PRD: [`prd-46-print-agent-2026-08-02`](../_bmad-output/planning-artifacts/prds/prd-46-print-agent-2026-08-02/prd.md) · Nền nghiên cứu: [báo cáo kỹ thuật](../_bmad-output/planning-artifacts/research/technical-in-hoa-don-may-in-nhiet-usb-docker-research-2026-08-02.md)
 
 **Trạng thái:** Linux xong (`list` / `test` / `pair` / `run`), đã nối được với ERP (backend 047-B) và một máy tính cầm được nhiều máy in (047-D). Windows là đợt sau. `list` và `test` chạy được **không cần ERP**, để kiểm tra máy in thật ngay lúc lắp.
 
-## Nguyên tắc: agent phải ngu
+## Nguyên tắc: cầu nối phải ngu
 
 Nó **không** render bill, **không** biết nghiệp vụ, **không** chạm DB, **không** nhận kết nối vào, **không** có UI.
 
@@ -21,7 +34,7 @@ Ngoại lệ duy nhất là gói [`internal/escpos`](internal/escpos/escpos.go):
 ### 1. Xem máy in nào đang cắm
 
 ```bash
-trcf-print-agent list
+trcf-bridge list
 ```
 
 ```
@@ -41,7 +54,7 @@ Không thấy gì thì nó tự chỉ ra cách chẩn đoán (`lsmod | grep usbl
 ### 2. In thử — không cần ERP
 
 ```bash
-trcf-print-agent test --device /dev/usb/lp0 --drawer
+trcf-bridge test --device /dev/usb/lp0 --drawer
 ```
 
 Máy chỉ có **một** máy in thì bỏ luôn `--device`, agent tự chọn. Máy in LAN thì `--net 192.168.1.60:9100`.
@@ -60,18 +73,18 @@ Két không bật thì đổi chân RJ11: `--drawer-pin 1` (mặc định 0 = ch
 ### 3. Ghép với ERP
 
 ```bash
-sudo trcf-print-agent pair --server http://192.168.1.50 --code 123456
+sudo trcf-bridge pair --server http://192.168.1.50 --code 123456
 ```
 
 Thiếu cờ nào nó hỏi ngay tại chỗ. Nó **in thử trước khi ghép** — máy in chưa in được thì dừng luôn, không tạo bản ghi rác bên ERP.
 
-Xong thì tự lưu `/etc/trcf-print-agent/config.json` (quyền 600 vì chứa token) và cài dịch vụ nền.
+Xong thì tự lưu `/etc/trcf-bridge/config.json` (quyền 600 vì chứa token) và cài dịch vụ nền.
 
 **Máy tính cắm nhiều máy in** thì chạy `pair` thêm lần nữa với mã của máy in kia:
 
 ```bash
-sudo trcf-print-agent pair --server http://192.168.1.50 --code 654321 --device /dev/usb/lp1
-sudo systemctl restart trcf-print-agent
+sudo trcf-bridge pair --server http://192.168.1.50 --code 654321 --device /dev/usb/lp1
+sudo systemctl restart trcf-bridge
 ```
 
 Lần thứ hai **không** đẻ ra token mới: agent gửi kèm token đang có, ERP gắn thêm máy in vào chính máy quầy này. Vẫn **một** tiến trình, **một** dịch vụ nền, **một** tệp cấu hình cho tất cả máy in.
@@ -81,7 +94,7 @@ Lần thứ hai **không** đẻ ra token mới: agent gửi kèm token đang c�
 `pair` đã cài systemd unit rồi. Xem nhật ký:
 
 ```bash
-journalctl -u trcf-print-agent -f
+journalctl -u trcf-bridge -f
 ```
 
 ## Cố định tên máy in (udev)
@@ -104,7 +117,7 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 Rồi ghép bằng tên cố định:
 
 ```bash
-sudo trcf-print-agent pair --server http://192.168.1.50 --code 123456 \
+sudo trcf-bridge pair --server http://192.168.1.50 --code 123456 \
      --device /dev/trcf-printer-bill
 ```
 
@@ -134,7 +147,7 @@ type Printer interface{ Write(b []byte) error }
 go test ./...
 GOOS=linux GOARCH=amd64 go build -trimpath \
   -ldflags "-s -w -X main.version=v0.1.0" \
-  -o dist/trcf-print-agent-linux-amd64 ./cmd/agent
+  -o dist/trcf-bridge-linux-amd64 ./cmd/agent
 ```
 
 Ra một file ~6 MB, không cần runtime, không cần cài kèm gì.
@@ -144,16 +157,16 @@ Ra một file ~6 MB, không cần runtime, không cần cài kèm gì.
 Agent **gọi ra**, ERP không gọi vào → máy quầy không mở cổng, không cần IP tĩnh, xuyên NAT. Khi backend dời lên cloud thì không phải đổi gì ở quán.
 
 ```
-POST /print-agent/pair                  {code, hostname, os, printer_desc, version}
+POST /bridge/pair                  {code, hostname, os, printer_desc, version}
      [Authorization: Bearer <token cũ>]  → {token, printer_id, printer_name}
      ↑ gửi kèm token đang có = GẮN THÊM máy in vào máy quầy này, trả lại token cũ
-GET  /print-agent/jobs/next?wait=25     → 200 {job_id, printer_id, format, data(base64)} | 204
-POST /print-agent/jobs/{id}/result      {ok, error?}
-POST /print-agent/heartbeat             {version, printers:[{printer_id, port_ok, last_err}]}
+GET  /bridge/jobs/next?wait=25     → 200 {job_id, printer_id, format, data(base64)} | 204
+POST /bridge/jobs/{id}/result      {ok, error?}
+POST /bridge/heartbeat             {version, printers:[{printer_id, port_ok, last_err}]}
                                           mỗi 30s
 ```
 
-Cần thêm route `/print-agent/*` → backend trong Caddyfile của [`trcf_deploy`](../trcf_deploy/Caddyfile).
+Cần thêm route `/bridge/*` → backend trong Caddyfile của [`trcf_deploy`](../trcf_deploy/Caddyfile).
 
 ## Khi nào KHÔNG cần agent
 

@@ -88,7 +88,7 @@ func TestReportResultSendsError(t *testing.T) {
 		if r.Method != http.MethodPost {
 			t.Errorf("method = %s, muốn POST", r.Method)
 		}
-		if !strings.HasSuffix(r.URL.Path, "/print-agent/jobs/42/result") {
+		if !strings.HasSuffix(r.URL.Path, "/bridge/jobs/42/result") {
 			t.Errorf("path = %s", r.URL.Path)
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
@@ -132,7 +132,7 @@ func TestReportResultSuccessOmitsError(t *testing.T) {
 }
 
 // URL có dấu / ở cuối là lỗi gõ rất hay gặp lúc lắp đặt; nó không được đẻ ra
-// đường dẫn "//print-agent/..." khiến proxy trả 404.
+// đường dẫn "//bridge/..." khiến proxy trả 404.
 func TestBaseURLTrailingSlashNormalized(t *testing.T) {
 	var path string
 
@@ -143,7 +143,7 @@ func TestBaseURLTrailingSlashNormalized(t *testing.T) {
 	defer srv.Close()
 
 	_, _ = New(srv.URL+"/", "tok", "test").NextJob(context.Background())
-	if path != "/print-agent/jobs/next" {
-		t.Errorf("path = %q, muốn /print-agent/jobs/next", path)
+	if path != "/bridge/jobs/next" {
+		t.Errorf("path = %q, muốn /bridge/jobs/next", path)
 	}
 }
