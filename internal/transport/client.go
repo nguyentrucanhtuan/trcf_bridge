@@ -51,6 +51,17 @@ type PrinterStatus struct {
 	PrinterID int    `json:"printer_id"`
 	PortOK    bool   `json:"port_ok"`
 	LastErr   string `json:"last_err,omitempty"`
+
+	// DeviceKey — chiếc máy agent ĐANG THỰC SỰ dùng cho máy in này (047f).
+	//
+	// Để ERP tự chữa bản gán đời cũ: quán nâng cấp xong thì `device_key` bên ERP vẫn
+	// là "/dev/usb/lp4" của lần ghép cũ, không khớp khoá nào trong kiểm kê, nên màn
+	// Máy in sẽ treo dòng đỏ "không thấy thiết bị đã gán" trên một máy in đang chạy
+	// tốt — báo động giả, và người dùng phải bấm chọn lại dù chẳng có gì hỏng.
+	//
+	// Chỉ gửi khi đã phân giải ĐƯỢC. Máy in rút dây thì bỏ trống, để ERP giữ nguyên
+	// khoá cũ và dòng đỏ kia trở thành cảnh báo THẬT.
+	DeviceKey string `json:"device_key,omitempty"`
 }
 
 // Client — một agent (một MÁY TÍNH), nhiều máy in, một token.

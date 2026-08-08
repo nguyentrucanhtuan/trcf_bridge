@@ -652,8 +652,12 @@ func healSelf(cfg *config.Config, path string) bool {
 // lẫn phiếu bếp). Chúng dùng chung MỘT hàng đợi và MỘT thợ, vì `usblp` chỉ cho
 // một tiến trình mở device node tại một thời điểm.
 type deviceGroup struct {
-	key        string // khoá danh tính, KHÔNG phải đường dẫn
-	label      string // để đọc nhật ký
+	key   string // khoá gom nhóm nội bộ, KHÔNG phải đường dẫn
+	label string // để đọc nhật ký
+	// deviceKey — chuỗi danh tính gửi lên ERP (`Identity.Key()`). Rỗng khi cấu hình
+	// đời cũ chưa có danh tính. Tách khỏi `key`: `key` chỉ để gom hàng đợi trong tiến
+	// trình này, còn `deviceKey` là thứ ERP cất và so — hai vai trò khác nhau.
+	deviceKey  string
 	printer    printer.Printer
 	printerIDs []int
 	jobs       chan *transport.Job
@@ -663,6 +667,14 @@ type deviceGroup struct {
 //
 // Trả kèm bảng tra printer_id → nhóm, vì lệnh in từ ERP mang printer_id chứ
 // không biết gì về thiết bị.
+// identityKeyOf — khoá danh tính để báo lên ERP, rỗng nếu chưa có danh tính.
+func identityKeyOf(b config.Binding) string {
+	if id := b.Printer.Identity; !id.IsZeroOrNil() {
+		return id.Key()
+	}
+	return ""
+}
+
 func groupByDevice(cfg *config.Config) (map[string]*deviceGroup, map[int]*deviceGroup, error) {
 	groups := make(map[string]*deviceGroup)
 	routes := make(map[int]*deviceGroup, len(cfg.Printers))
@@ -677,9 +689,10 @@ func groupByDevice(cfg *config.Config) (map[string]*deviceGroup, map[int]*device
 				continue
 			}
 			g = &deviceGroup{
-				key:     key,
-				label:   describeBinding(b),
-				printer: p,
+				key:       key,
+				label:     describeBinding(b),
+				deviceKey: identityKeyOf(b),
+				printer:   p,
 				// Đệm để vòng lặp chính không phải chờ thợ; đầy hàng nghĩa là
 				// thiết bị đó đang tắc thật, và lúc đó báo hỏng còn hơn giữ việc
 				// im lặng.
@@ -838,6 +851,11 @@ func heartbeatLoop(
 				s := transport.PrinterStatus{PrinterID: id, PortOK: portErr == nil}
 				if portErr != nil {
 					s.LastErr = portErr.Error()
+				} else {
+					// Chỉ khai khoá khi vừa phân giải + mở được thiết bị. Khai lúc đang
+					// hỏng là bảo ERP "tôi vẫn dùng chiếc này" cho một chiếc có thể đã bị
+					// rút ra — ERP sẽ chữa bản gán theo một sự thật không còn đúng.
+					s.DeviceKey = g.deviceKey
 				}
 				status = append(status, s)
 			}
