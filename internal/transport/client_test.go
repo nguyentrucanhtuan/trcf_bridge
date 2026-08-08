@@ -147,3 +147,120 @@ func TestBaseURLTrailingSlashNormalized(t *testing.T) {
 		t.Errorf("path = %q, muốn /bridge/jobs/next", path)
 	}
 }
+
+// 🎯 ERP bản trước 047f bật `forbidNonWhitelisted`, nên trường `devices` lạ làm CẢ
+// gói nhịp sống rơi 400 — đo thật ở coffeetreeroaster 2026-08-08:
+//
+//	{"message":["property devices should not exist"],"statusCode":400}
+//
+// Hậu quả nếu để nguyên KHÔNG phải agent chết, mà tệ hơn: nhịp hỏi việc vẫn làm
+// `last_seen_at` tươi nên màn hình báo "máy quầy đang chạy · máy in tốt" trong khi
+// trạng thái cổng đứng hình ở lần báo cuối. Đúng kiểu màn hình nói dối.
+func TestHeartbeatERPCuTuChoiKiemKeThiGuiLaiKhongKemTheo(t *testing.T) {
+	var bodies []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var b map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		bodies = append(bodies, b)
+		if _, has := b["devices"]; has { // đúng hành vi ERP cũ
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"message":["property devices should not exist"]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "tok", "test")
+	devs := []DeviceInfo{{DeviceKey: "usb://POS-80?serial=X", Model: "POS-80"}}
+
+	// Nhịp sống PHẢI thành công — trạng thái cổng quan trọng hơn ô chọn thiết bị.
+	if _, err := c.Heartbeat(context.Background(), []PrinterStatus{{PrinterID: 1, PortOK: true}}, devs); err != nil {
+		t.Fatalf("nhịp sống không được hỏng chỉ vì ERP chưa biết kiểm kê: %v", err)
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("muốn 2 lần gọi (kèm rồi bỏ kiểm kê), nhận %d", len(bodies))
+	}
+	if _, has := bodies[1]["devices"]; has {
+		t.Error("lần gửi lại vẫn kèm devices — sẽ 400 tiếp")
+	}
+	if bodies[1]["printers"] == nil {
+		t.Error("gửi lại phải GIỮ trạng thái cổng, đó mới là thứ không được mất")
+	}
+}
+
+// Sau khi bị từ chối thì NHỊN, không nện ERP cũ hai request mỗi nhịp.
+func TestHeartbeatNhinKiemKeSauKhiBiTuChoi(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		var b map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		if _, has := b["devices"]; has {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "tok", "test")
+	devs := []DeviceInfo{{DeviceKey: "usb://X"}}
+	for i := 0; i < 5; i++ {
+		if _, err := c.Heartbeat(context.Background(), nil, devs); err != nil {
+			t.Fatalf("nhịp %d hỏng: %v", i, err)
+		}
+	}
+	// Nhịp 1 tốn 2 request (thử + gửi lại), 4 nhịp sau mỗi nhịp 1 request.
+	if calls != 6 {
+		t.Errorf("muốn 6 request, nhận %d — nhịn không có tác dụng", calls)
+	}
+}
+
+// Nhịn có HẠN: ngày ERP được nâng cấp thì agent phải tự bật kiểm kê lên lại, không
+// đợi ai ra quán khởi động dịch vụ.
+func TestHeartbeatThuLaiKiemKeSauKyNhin(t *testing.T) {
+	erpMoi := false
+	kemKiemKe := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var b map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		if _, has := b["devices"]; has {
+			kemKiemKe++
+			if !erpMoi {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"bindings_rev":7}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "tok", "test")
+	devs := []DeviceInfo{{DeviceKey: "usb://X"}}
+	_, _ = c.Heartbeat(context.Background(), nil, devs) // bị từ chối → vào kỳ nhịn
+	erpMoi = true                                       // quán được nâng cấp ERP
+
+	var rev int
+	for i := 0; i < devicesRetryEvery+1; i++ {
+		rev, _ = c.Heartbeat(context.Background(), nil, devs)
+	}
+	if kemKiemKe < 2 {
+		t.Fatalf("chưa thử lại kiểm kê sau kỳ nhịn (%d lần kèm)", kemKiemKe)
+	}
+	if rev != 7 {
+		t.Errorf("ERP mới rồi mà chưa nhận được bindings_rev: %d", rev)
+	}
+}
+
+// Lỗi 400 KHÔNG kèm kiểm kê là lỗi thật — đừng nuốt nó thành im lặng.
+func TestHeartbeat400KhongKemKiemKeVanLaLoi(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer srv.Close()
+
+	if _, err := New(srv.URL, "tok", "test").Heartbeat(context.Background(), nil, nil); err == nil {
+		t.Error("400 không liên quan kiểm kê thì phải báo lỗi")
+	}
+}

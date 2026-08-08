@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -62,7 +63,24 @@ type Client struct {
 	// heartbeat phải hỏng nhanh để không kẹt vòng lặp chính.
 	pollHTTP  *http.Client
 	shortHTTP *http.Client
+
+	// Số nhịp còn phải NHỊN gửi kiểm kê thiết bị, sau khi ERP từ chối nó.
+	//
+	// ERP bản trước 047f bật `forbidNonWhitelisted`, nên trường `devices` lạ làm
+	// CẢ gói nhịp sống rơi 400. Hậu quả không phải agent chết mà tệ hơn: nhịp hỏi
+	// việc vẫn làm `last_seen_at` tươi, nên màn hình báo "máy quầy đang chạy · máy
+	// in tốt" trong khi trạng thái cổng đứng hình ở lần báo cuối — màn hình nói dối.
+	//
+	// Nên khi bị từ chối thì bỏ kiểm kê ra, gửi lại ngay, và thử lại sau ít nhịp.
+	// Thử lại chứ không tắt hẳn: ngày ERP được nâng cấp thì agent phải tự bật lên
+	// lại, không đợi ai ra quán khởi động nó.
+	devicesMuted int
 }
+
+// Số nhịp nhịn gửi kiểm kê sau một lần bị từ chối. 20 nhịp × 30 giây = 10 phút:
+// đủ thưa để không quấy ERP cũ, đủ dày để quán được nâng cấp ERP lúc 9 giờ sáng thì
+// chậm nhất 9h10 ô chọn thiết bị đã có dữ liệu.
+const devicesRetryEvery = 20
 
 func New(baseURL, token, version string) *Client {
 	return &Client{
@@ -155,6 +173,28 @@ func (c *Client) ReportResult(ctx context.Context, jobID int64, printErr error) 
 // Trả về `bindings_rev` của ERP. ERP bản cũ không có trường này → về 0, và người
 // gọi hiểu là "không có gì để đồng bộ", chạy tiếp theo cấu hình cục bộ.
 func (c *Client) Heartbeat(ctx context.Context, printers []PrinterStatus, devices []DeviceInfo) (int, error) {
+	// Đang trong kỳ nhịn (ERP cũ vừa từ chối) thì bỏ kiểm kê ra cho tới lượt thử lại.
+	if c.devicesMuted > 0 {
+		c.devicesMuted--
+		devices = nil
+	}
+
+	rev, err := c.heartbeatOnce(ctx, printers, devices)
+	if err == nil || devices == nil || !errors.Is(err, errFieldRejected) {
+		return rev, err
+	}
+
+	// ERP bản trước 047f không biết trường `devices`. Nhịn một lúc rồi gửi lại KHÔNG
+	// kèm kiểm kê — thà mất ô chọn thiết bị trên web còn hơn mất trạng thái cổng máy in.
+	c.devicesMuted = devicesRetryEvery
+	return c.heartbeatOnce(ctx, printers, nil)
+}
+
+// errFieldRejected — ERP từ chối vì có trường nó không biết (400 của
+// `forbidNonWhitelisted`), khác hẳn "ERP hỏng" hay "mất mạng".
+var errFieldRejected = errors.New("ERP chưa biết trường này")
+
+func (c *Client) heartbeatOnce(ctx context.Context, printers []PrinterStatus, devices []DeviceInfo) (int, error) {
 	body := map[string]any{
 		"version":  c.version,
 		"printers": printers,
@@ -179,6 +219,9 @@ func (c *Client) Heartbeat(ctx context.Context, printers []PrinterStatus, device
 	}
 	defer drain(resp)
 
+	if resp.StatusCode == http.StatusBadRequest && devices != nil {
+		return 0, fmt.Errorf("%w: heartbeat 400 khi kèm kiểm kê thiết bị", errFieldRejected)
+	}
 	if resp.StatusCode >= 300 {
 		return 0, fmt.Errorf("heartbeat: ERP trả mã %d", resp.StatusCode)
 	}
