@@ -161,3 +161,131 @@ func TestLoadErrorsAreActionable(t *testing.T) {
 		})
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Danh tính thiết bị (047f)
+// ─────────────────────────────────────────────────────────────────────────────
+
+func usbWithID(target string, id printer.Identity) printer.Config {
+	c := usb(target)
+	c.Identity = &id
+	return c
+}
+
+// Cấu hình MỚI phải đọc được bằng bản binary CŨ và ngược lại.
+//
+// Đây là điều kiện để "hạ cấp binary" là đường lùi đủ: `identity` chỉ THÊM vào,
+// `target` giữ nguyên. Không có tính chất này thì lùi bản ở quán nghĩa là phải
+// sửa tệp bằng tay lúc 7 giờ sáng.
+func TestDanhTinhChiThemKhongXoaTarget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	want := &Config{
+		ServerURL: "http://192.168.1.50",
+		Token:     "tok",
+		Printers: []Binding{{
+			PrinterID: 7,
+			Printer: usbWithID("/dev/usb/lp0", printer.Identity{
+				Serial: "1C79EC420000", CMD: "EPSON", IDs: "0483:5743", USBPath: "1-3", Model: "POS-80",
+			}),
+		}},
+	}
+	if err := Save(path, want); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"target": "/dev/usb/lp0"`) {
+		t.Error("phải GIỮ target — nó là đường lùi cho binary cũ và manh mối tự chữa")
+	}
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("round-trip lệch:\n got %+v\nmuốn %+v", *got, *want)
+	}
+}
+
+// Cấu hình đời cũ (chưa có identity) vẫn phải nạp được — 5 quán đang chạy nó.
+func TestCauHinhDoiCuVanNapDuoc(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	old := `{"server_url":"http://x","token":"t","printers":[{"printer_id":3,"printer":{"kind":"usb","target":"/dev/usb/lp2"}}]}`
+	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("cấu hình đời cũ phải nạp được: %v", err)
+	}
+	if got.Printers[0].Printer.Identity != nil {
+		t.Error("chưa tự chữa thì identity phải là nil")
+	}
+	if got.Printers[0].DeviceKey() != "path:/dev/usb/lp2" {
+		t.Errorf("chưa có danh tính thì khoá phải rơi về đường dẫn: %s", got.Printers[0].DeviceKey())
+	}
+}
+
+// Khoá gom nhóm phải theo CHIẾC MÁY, không theo đường dẫn.
+//
+// Cùng một máy in mà hôm nay ở lp0, mai ở lp1 vẫn phải ra CÙNG một khoá — nếu
+// không, cùng một thiết bị sẽ đẻ ra hai hàng đợi và hai hàng đợi ghi vào một
+// cổng chính là lỗi mà việc gom hàng đợi sinh ra để chặn.
+func TestDeviceKeyTheoDanhTinhKhongTheoDuongDan(t *testing.T) {
+	id := printer.Identity{Serial: "1C79EC420000", CMD: "EPSON", IDs: "0483:5743", USBPath: "1-3"}
+	homNay := Binding{PrinterID: 1, Printer: usbWithID("/dev/usb/lp0", id)}
+	homSau := Binding{PrinterID: 2, Printer: usbWithID("/dev/usb/lp7", id)}
+
+	if homNay.DeviceKey() != homSau.DeviceKey() {
+		t.Errorf("đổi đường dẫn không được đổi khoá: %s ≠ %s", homNay.DeviceKey(), homSau.DeviceKey())
+	}
+}
+
+// Hai máy in ERP dùng chung một thiết bị KHÔNG còn là lỗi.
+//
+// Ca dùng thật của quán: một máy POS-80 in cả bill lẫn phiếu bếp. Trước đây
+// agent TỪ CHỐI khởi động với cấu hình này.
+func TestDungChungThietBiLaCanhBaoChuKhongPhaiLoi(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	id := printer.Identity{Serial: "1C79EC420000", CMD: "EPSON", IDs: "0483:5743", USBPath: "1-3"}
+	cfg := &Config{
+		ServerURL: "http://x", Token: "t",
+		Printers: []Binding{
+			{PrinterID: 1, Printer: usbWithID("/dev/usb/lp0", id)}, // Bill quầy
+			{PrinterID: 2, Printer: usbWithID("/dev/usb/lp0", id)}, // Phiếu bếp
+		},
+	}
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("dùng chung thiết bị KHÔNG được chặn agent khởi động: %v", err)
+	}
+
+	w := got.Warnings()
+	if len(w) != 1 {
+		t.Fatalf("muốn đúng 1 cảnh báo, nhận %d: %v", len(w), w)
+	}
+	for _, want := range []string{"id 1", "id 2", "CHUNG"} {
+		if !strings.Contains(w[0], want) {
+			t.Errorf("cảnh báo %q thiếu %q", w[0], want)
+		}
+	}
+}
+
+// Hai thiết bị khác nhau thì im lặng — cảnh báo thừa làm người ta quen bỏ qua.
+func TestKhacThietBiThiKhongCanhBao(t *testing.T) {
+	cfg := &Config{Printers: []Binding{
+		{PrinterID: 1, Printer: usbWithID("/dev/usb/lp0", printer.Identity{Serial: "AAA"})},
+		{PrinterID: 2, Printer: usbWithID("/dev/usb/lp1", printer.Identity{Serial: "BBB"})},
+	}}
+	if w := cfg.Warnings(); len(w) != 0 {
+		t.Errorf("không nên cảnh báo gì: %v", w)
+	}
+}

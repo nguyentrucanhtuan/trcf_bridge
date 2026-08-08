@@ -23,6 +23,19 @@ type Binding struct {
 	Printer printer.Config `json:"printer"`
 }
 
+// DeviceKey — khoá chỉ MỘT CHIẾC MÁY vật lý, dùng để gom hàng đợi in.
+//
+// Ưu tiên danh tính, chỉ rơi về đường dẫn khi cấu hình còn đời cũ. Khoá theo
+// danh tính là bắt buộc: khoá theo `/dev/usb/lp0` thì lúc đường dẫn đổi giữa
+// phiên chạy, cùng một chiếc máy sẽ đẻ ra hai hàng đợi — và hai hàng đợi cùng
+// ghi vào một thiết bị chính là lỗi mà việc gom hàng đợi sinh ra để chặn.
+func (b Binding) DeviceKey() string {
+	if id := b.Printer.Identity; id != nil && !id.IsZero() {
+		return id.MatchKey()
+	}
+	return "path:" + b.Printer.Target
+}
+
 // Config — toàn bộ thứ agent cần biết. Cố ý nhỏ: mọi thứ khác (mẫu bill, định
 // tuyến, nội dung) nằm ở backend.
 type Config struct {
@@ -116,7 +129,6 @@ func (c *Config) validate() error {
 	if len(c.Printers) == 0 {
 		return fmt.Errorf("chưa ghép máy in nào — chạy `pair` với mã lấy ở ERP")
 	}
-	seen := map[string]int{}
 	for i, b := range c.Printers {
 		if b.PrinterID == 0 {
 			return fmt.Errorf("máy in thứ %d thiếu printer_id", i+1)
@@ -124,20 +136,42 @@ func (c *Config) validate() error {
 		if b.Printer.Kind == "" || b.Printer.Target == "" {
 			return fmt.Errorf("máy in thứ %d chưa chọn thiết bị (kind/target rỗng)", i+1)
 		}
-		// Hai máy in bên ERP trỏ vào CÙNG một thiết bị: xảy ra khi ghép máy in thứ hai
-		// mà quên `--device`, agent tự dò rồi chọn lại đúng máy in đầu. Hậu quả là
-		// phiếu bếp chui ra máy in bill, hoặc hai lệnh ghi xen kẽ cho ra một tờ ký tự
-		// rác — mà chẳng có gì báo lỗi.
-		key := b.Printer.Kind + "|" + b.Printer.Target
+	}
+	return nil
+}
+
+// Warnings — chuyện đáng ngờ nhưng KHÔNG chặn agent chạy.
+//
+// ─────────────────────────────────────────────────────────────────────────
+// Trước đây "hai máy in bên ERP cùng trỏ một thiết bị" là LỖI và agent từ chối
+// khởi động. Luật đó viết ra để bắt lỗi vô ý (ghép máy thứ hai mà quên
+// `--device`, agent tự dò rồi chọn lại đúng máy đầu) — nhưng nó cấm luôn một ca
+// dùng HỢP LỆ và phổ biến ở quán nhỏ: **một máy POS-80 in cả bill lẫn phiếu bếp**.
+//
+// Đó là chuẩn mực ngoài ngành, không phải chắp vá — CUPS gọi là *printer
+// instances*: nhiều hàng đợi trỏ cùng một thiết bị vật lý, mỗi hàng đợi mang cấu
+// hình riêng.
+//
+// Nguy cơ thật của việc dùng chung KHÔNG nằm ở cấu hình mà ở đồng thời: `usblp`
+// chỉ cho một tiến trình mở thiết bị tại một thời điểm. Chỗ đó xử lý bằng cách
+// gom hàng đợi theo THIẾT BỊ ở `cmd/agent`, không phải bằng cách cấm khai báo.
+// ─────────────────────────────────────────────────────────────────────────
+func (c *Config) Warnings() []string {
+	var out []string
+	seen := map[string]int{}
+	for i, b := range c.Printers {
+		key := b.Printer.Kind + "|" + b.DeviceKey()
 		if prev, dup := seen[key]; dup {
-			return fmt.Errorf(
-				"máy in id %d và id %d cùng trỏ vào %q — mỗi máy in phải một thiết bị riêng; "+
-					"ghép lại bằng `pair --device <thiết bị đúng>` (xem `list`)",
-				c.Printers[prev].PrinterID, b.PrinterID, b.Printer.Target)
+			out = append(out, fmt.Sprintf(
+				"máy in id %d và id %d dùng CHUNG một thiết bị (%s) — hợp lệ khi cố ý "+
+					"(vd một máy in cả bill lẫn phiếu bếp); nếu không cố ý thì ghép lại "+
+					"bằng `pair --device <thiết bị đúng>` (xem `list`)",
+				c.Printers[prev].PrinterID, b.PrinterID, b.Printer.Target))
+			continue
 		}
 		seen[key] = i
 	}
-	return nil
+	return out
 }
 
 // CheckWritable kiểm xem có ghi được cấu hình vào `path` hay không.

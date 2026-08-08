@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -107,21 +108,31 @@ func cmdList() error {
 	fmt.Printf("Thấy %d máy in:\n\n", len(found))
 	for i, f := range found {
 		fmt.Printf("  [%d] %s\n", i+1, f.Label())
-		if f.IDs != "" {
-			fmt.Printf("      mã thiết bị: %s\n", f.IDs)
+		if f.Identity.IDs != "" {
+			fmt.Printf("      mã thiết bị: %s\n", f.Identity.IDs)
 		}
 	}
 	fmt.Println()
 	fmt.Println("In thử:  trcf-bridge test --device", found[0].Path)
 
-	// Nhiều hơn một máy in thì tên /dev/usb/lpN có thể HOÁN ĐỔI sau khi khởi
-	// động lại — nhắc ngay tại đây, vì lúc đó người lắp đang có đủ thông tin
-	// (mã thiết bị) để làm udev rule.
-	if len(found) > 1 {
+	// Tên /dev/usb/lpN vẫn đổi chỗ sau mỗi lần khởi động, nhưng agent nay tự tìm
+	// lại máy theo DANH TÍNH nên chuyện đó không còn là vấn đề — KHÔNG nhắc udev
+	// nữa, lời khuyên thừa làm người lắp mất công vô ích.
+	//
+	// Chỉ còn đúng một ca đáng cảnh báo: máy in không khai số sê-ri. Lúc đó danh
+	// tính rơi về mã thiết bị + vị trí cổng USB, nên cắm sang cổng khác là mất
+	// khớp — người lắp cần biết để đừng đổi cổng, hoặc để dán nhãn lên cổng.
+	var yeu []string
+	for _, f := range found {
+		if f.Identity.Serial == "" {
+			yeu = append(yeu, f.Path)
+		}
+	}
+	if len(yeu) > 0 {
 		fmt.Println()
-		fmt.Println("⚠ Có nhiều hơn một máy in: tên /dev/usb/lpN có thể đổi chỗ cho nhau")
-		fmt.Println("  sau khi khởi động lại máy. Nên cố định tên bằng udev rule —")
-		fmt.Println("  xem mục \"Cố định tên máy in\" trong README.")
+		fmt.Printf("⚠ Máy in không khai số sê-ri: %s\n", strings.Join(yeu, ", "))
+		fmt.Println("  Agent sẽ nhận diện bằng mã thiết bị + VỊ TRÍ CỔNG USB, nên nếu cắm")
+		fmt.Println("  sang cổng khác thì phải chọn lại thiết bị bên ERP. Dán nhãn lên cổng.")
 	}
 	return nil
 }
@@ -190,9 +201,10 @@ func resolveTarget(device, netAddr string) (printer.Config, error) {
 	case device != "" && netAddr != "":
 		return printer.Config{}, errors.New("chỉ được chọn một trong --device hoặc --net")
 	case netAddr != "":
+		// Máy in LAN đã có danh tính bền vững sẵn: IP:port. Không cần gì thêm.
 		return printer.Config{Kind: printer.KindNet, Target: netAddr}, nil
 	case device != "":
-		return printer.Config{Kind: printer.KindUSB, Target: device}, nil
+		return usbConfig(device, nil), nil
 	}
 
 	found, err := printer.Discover()
@@ -204,7 +216,7 @@ func resolveTarget(device, netAddr string) (printer.Config, error) {
 		return printer.Config{}, errors.New("không thấy máy in USB nào — chạy `trcf-bridge list` để chẩn đoán, hoặc dùng --net cho máy in mạng")
 	case 1:
 		fmt.Printf("Tự chọn máy in duy nhất: %s\n", found[0].Label())
-		return printer.Config{Kind: printer.KindUSB, Target: found[0].Path}, nil
+		return usbConfig(found[0].Path, &found[0].Identity), nil
 	default:
 		var b strings.Builder
 		b.WriteString("có nhiều máy in, hãy chỉ rõ bằng --device:\n")
@@ -213,6 +225,39 @@ func resolveTarget(device, netAddr string) (printer.Config, error) {
 		}
 		return printer.Config{}, errors.New(b.String())
 	}
+}
+
+// usbConfig dựng cấu hình máy in USB kèm DANH TÍNH của thiết bị đang nằm ở đó.
+//
+// Đọc danh tính ngay lúc chọn (chứ không để lần in đầu mới đọc) vì đây là lúc
+// người lắp đang đứng cạnh máy: sai thì họ sửa được ngay. Đọc không ra thì vẫn
+// ghép được theo đường dẫn — máy in cũ kỹ không khai gì cũng phải dùng được,
+// chỉ là mất khả năng tự tìm lại khi số lpN đổi.
+func usbConfig(path string, known *printer.Identity) printer.Config {
+	cfg := printer.Config{Kind: printer.KindUSB, Target: path}
+	if known != nil && !known.IsZero() {
+		id := *known
+		cfg.Identity = &id
+		return cfg
+	}
+	if id, err := printer.IdentityForPath(path); err == nil {
+		cfg.Identity = &id
+	} else {
+		fmt.Printf("⚠ Không đọc được danh tính của %s (%v).\n", path, err)
+		fmt.Println("  Vẫn ghép được, nhưng nếu số /dev/usb/lpN đổi sau khi khởi động thì phải ghép lại.")
+	}
+	return cfg
+}
+
+// printerDesc — chuỗi mô tả gửi lên ERP để hiện ở màn Máy in.
+//
+// Trước đây gửi ĐƯỜNG DẪN ("/dev/usb/lp2"), nên ERP chưa từng nhìn thấy tên máy
+// in nào. Nay gửi danh tính đọc được: "Printer POS-80 · EPSON · SN 1C79EC420000".
+func printerDesc(cfg printer.Config) string {
+	if id := cfg.Identity; id != nil && !id.IsZero() {
+		return id.Label()
+	}
+	return cfg.Target
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -289,7 +334,7 @@ func cmdPair(args []string) error {
 		Code:        strings.TrimSpace(*code),
 		Hostname:    host,
 		OS:          "linux",
-		PrinterDesc: target.Target,
+		PrinterDesc: printerDesc(target),
 		Version:     version,
 	}, cfg.Token)
 	if err != nil {
@@ -384,23 +429,28 @@ func cmdRun(args []string) error {
 		return err
 	}
 
-	// Mở TẤT CẢ máy in ngay từ đầu, tra theo id khi có việc. `Open` cố ý không
-	// kiểm tra thiết bị có tồn tại hay không (xem `openUSB`), nên một máy in đang
-	// tắt cũng không cản agent khởi động — lỗi sẽ hiện ra ở từng lần in.
+	// Cho package printer nói ra chuyện nó thấy (máy in đổi đường dẫn, khớp bằng
+	// khoá lùi). Chỉ `run` gắn — `list`/`test` giữ màn hình sạch.
+	printer.Logf = logf
+
+	// Tự chữa cấu hình đời cũ TRƯỚC khi mở máy in: biến "/dev/usb/lp2" thành một
+	// danh tính bền vững, để quán đã cài không phải khai lại gì.
+	if healSelf(cfg, *cfgPath) {
+		logf("đã ghi danh tính máy in vào %s", *cfgPath)
+	}
+	for _, w := range cfg.Warnings() {
+		logf("⚠ %s", w)
+	}
+
+	// Gom máy in ERP theo THIẾT BỊ VẬT LÝ. `Open` cố ý không kiểm tra thiết bị có
+	// tồn tại hay không (xem `openUSB`), nên một máy in đang tắt cũng không cản
+	// agent khởi động — lỗi sẽ hiện ra ở từng lần in.
 	//
 	// Một mục cấu hình sai (gõ nhầm đường dẫn máy in tem) KHÔNG được làm cả quầy
 	// không in được gì: ghi lại rồi đi tiếp, chỉ bỏ cuộc khi không mở nổi máy nào.
-	printers := make(map[int]printer.Printer, len(cfg.Printers))
-	for _, b := range cfg.Printers {
-		p, err := printer.Open(b.Printer)
-		if err != nil {
-			logf("BỎ QUA máy in id %d (%s): %v", b.PrinterID, b.Printer.Target, err)
-			continue
-		}
-		printers[b.PrinterID] = p
-	}
-	if len(printers) == 0 {
-		return fmt.Errorf("không mở được máy in nào trong cấu hình — chạy `list` để xem thiết bị đang cắm")
+	groups, routes, err := groupByDevice(cfg)
+	if err != nil {
+		return err
 	}
 	client := transport.New(cfg.ServerURL, cfg.Token, version)
 
@@ -409,26 +459,34 @@ func cmdRun(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	logf("khởi động %s — ERP %s, %d máy in", version, cfg.ServerURL, len(cfg.Printers))
+	logf("khởi động %s — ERP %s, %d máy in trên %d thiết bị", version, cfg.ServerURL, len(cfg.Printers), len(groups))
 	for _, b := range cfg.Printers {
-		logf("  máy in id %d → %s", b.PrinterID, b.Printer.Target)
+		logf("  máy in id %d → %s", b.PrinterID, describeBinding(b))
 	}
 
-	// MỖI máy in một thợ riêng. Đây là điểm đánh đổi nặng nhất khi gộp nhiều máy in
-	// vào một tiến trình: `Write` của device node USB có thể TREO VÔ HẠN (máy in kẹt
-	// giấy, và `SetWriteDeadline` bị usblp bỏ qua — xem `usb_linux.go`). Nếu vòng lặp
-	// chính tự ghi thì một máy in bếp kẹt giấy sẽ chặn luôn việc in bill cho khách
-	// đang đứng đợi. Mô hình cũ không có rủi ro này vì mỗi máy in một tiến trình.
-	workers := make(map[int]chan *transport.Job, len(printers))
-	for id, p := range printers {
-		// Đệm để vòng lặp chính không phải chờ thợ; đầy hàng nghĩa là máy in đó
-		// đang tắc thật, và lúc đó báo hỏng còn hơn giữ việc im lặng.
-		ch := make(chan *transport.Job, 16)
-		workers[id] = ch
-		go printerWorker(ctx, client, p, id, ch)
+	// MỘT thợ cho MỖI THIẾT BỊ — không phải mỗi máy in ERP.
+	//
+	// ─────────────────────────────────────────────────────────────────────
+	// Vì sao gom theo thiết bị: `usblp` chỉ cho MỘT tiến trình mở device node tại
+	// một thời điểm. Quán khai một máy POS-80 làm cả "Bill quầy" lẫn "Phiếu bếp"
+	// (ca dùng hợp lệ, xem `config.Warnings`) mà cho mỗi máy in một thợ thì hai
+	// thợ sẽ tranh nhau cùng một cổng: một thợ thắng, thợ kia ăn EBUSY và lệnh in
+	// HỎNG — mà câu lỗi lại nói "đang bị chương trình khác giữ, thường là CUPS",
+	// đổ oan cho CUPS và đẩy người sửa đi sai hướng cả buổi.
+	//
+	// Vì sao vẫn phải nhiều thợ (không gộp hết vào vòng lặp chính): `Write` của
+	// device node có thể TREO tới 15 giây khi máy in kẹt giấy. Một máy in bếp kẹt
+	// giấy không được phép chặn bill cho khách đang đứng đợi — nên hai THIẾT BỊ
+	// khác nhau vẫn chạy độc lập hoàn toàn.
+	//
+	// Đánh đổi phải nói trước với chủ quán: gộp hai vai trò vào MỘT máy vật lý thì
+	// kẹt giấy chặn cả hai. Đó là vật lý, không phải phần mềm.
+	// ─────────────────────────────────────────────────────────────────────
+	for _, g := range groups {
+		go deviceWorker(ctx, client, g)
 	}
 
-	go heartbeatLoop(ctx, client, printers, cfg)
+	go heartbeatLoop(ctx, client, groups, routes)
 
 	backoff := backoffMin
 	for {
@@ -440,7 +498,7 @@ func cmdRun(args []string) error {
 		job, err := client.NextJob(ctx)
 		switch {
 		case err == nil:
-			dispatchJob(ctx, client, workers, job)
+			dispatchJob(ctx, client, routes, job)
 			backoff = backoffMin // gọi được ERP = mạng lành, reset chờ
 			continue
 		case errors.Is(err, transport.ErrNoJob):
@@ -460,6 +518,112 @@ func cmdRun(args []string) error {
 	}
 }
 
+// healSelf nâng cấu hình đời cũ (chỉ có đường dẫn) lên danh tính bền vững.
+//
+// ─────────────────────────────────────────────────────────────────────────
+// Đây là đường di trú cho 5 quán đã cài: agent bản mới đọc cấu hình bản cũ, tự
+// đọc danh tính của thiết bị đang nằm ở đường dẫn ấy rồi ghi lại. Quán được cố
+// định vĩnh viễn mà KHÔNG ai phải gõ gì, không phải SSH.
+//
+// Khi đường dẫn cũ KHÔNG còn thiết bị nào (đúng ca Gác Dero: cấu hình trỏ lp2,
+// sau khởi động chỉ còn lp0/lp1) thì TUYỆT ĐỐI KHÔNG ĐOÁN — không được vơ lấy
+// thiết bị còn lại, vì đoán sai chính là thứ đã in ra tờ giấy đầy chữ lệnh. Ghi
+// nhật ký rồi để lệnh in báo hỏng, chờ người chọn lại bên ERP.
+// ─────────────────────────────────────────────────────────────────────────
+func healSelf(cfg *config.Config, path string) bool {
+	changed := false
+	for i := range cfg.Printers {
+		b := &cfg.Printers[i]
+		if b.Printer.Kind != printer.KindUSB {
+			continue // máy in LAN: IP:port vốn đã bền vững
+		}
+		if id := b.Printer.Identity; id != nil && !id.IsZero() {
+			continue
+		}
+		id, err := printer.IdentityForPath(b.Printer.Target)
+		if err != nil {
+			logf("máy in id %d: chưa suy được danh tính từ %s (%v) — vào ERP mục Máy in chọn lại thiết bị",
+				b.PrinterID, b.Printer.Target, err)
+			continue
+		}
+		b.Printer.Identity = &id
+		logf("máy in id %d: %s → %s", b.PrinterID, b.Printer.Target, id.Label())
+		changed = true
+	}
+	if !changed {
+		return false
+	}
+	if err := config.Save(path, cfg); err != nil {
+		// Ghi hỏng KHÔNG được cản việc in: danh tính đã nằm trong bộ nhớ, phiên
+		// này chạy đúng. Chỉ là lần khởi động sau phải suy lại từ đầu.
+		logf("⚠ không ghi được danh tính vào %s: %v — phiên này vẫn chạy đúng", path, err)
+		return false
+	}
+	return true
+}
+
+// deviceGroup — một THIẾT BỊ vật lý và mọi máy in ERP trỏ vào nó.
+//
+// Nhiều máy in ERP dùng chung một thiết bị là ca hợp lệ (một POS-80 in cả bill
+// lẫn phiếu bếp). Chúng dùng chung MỘT hàng đợi và MỘT thợ, vì `usblp` chỉ cho
+// một tiến trình mở device node tại một thời điểm.
+type deviceGroup struct {
+	key        string // khoá danh tính, KHÔNG phải đường dẫn
+	label      string // để đọc nhật ký
+	printer    printer.Printer
+	printerIDs []int
+	jobs       chan *transport.Job
+}
+
+// groupByDevice gom cấu hình thành các nhóm theo thiết bị vật lý.
+//
+// Trả kèm bảng tra printer_id → nhóm, vì lệnh in từ ERP mang printer_id chứ
+// không biết gì về thiết bị.
+func groupByDevice(cfg *config.Config) (map[string]*deviceGroup, map[int]*deviceGroup, error) {
+	groups := make(map[string]*deviceGroup)
+	routes := make(map[int]*deviceGroup, len(cfg.Printers))
+
+	for _, b := range cfg.Printers {
+		key := b.DeviceKey()
+		g, ok := groups[key]
+		if !ok {
+			p, err := printer.Open(b.Printer)
+			if err != nil {
+				logf("BỎ QUA máy in id %d (%s): %v", b.PrinterID, b.Printer.Target, err)
+				continue
+			}
+			g = &deviceGroup{
+				key:     key,
+				label:   describeBinding(b),
+				printer: p,
+				// Đệm để vòng lặp chính không phải chờ thợ; đầy hàng nghĩa là
+				// thiết bị đó đang tắc thật, và lúc đó báo hỏng còn hơn giữ việc
+				// im lặng.
+				jobs: make(chan *transport.Job, 16),
+			}
+			groups[key] = g
+		}
+		g.printerIDs = append(g.printerIDs, b.PrinterID)
+		routes[b.PrinterID] = g
+	}
+
+	if len(groups) == 0 {
+		return nil, nil, fmt.Errorf("không mở được máy in nào trong cấu hình — chạy `list` để xem thiết bị đang cắm")
+	}
+	return groups, routes, nil
+}
+
+// describeBinding — dòng chữ cho người đọc nhật ký.
+//
+// Ưu tiên danh tính vì đó mới là chiếc máy; đường dẫn chỉ là chỗ nó đang nằm
+// hôm nay và sẽ đổi sau lần khởi động tới.
+func describeBinding(b config.Binding) string {
+	if id := b.Printer.Identity; id != nil && !id.IsZero() {
+		return id.Label()
+	}
+	return b.Printer.Target
+}
+
 // handleJob in một việc rồi báo kết quả.
 //
 // Điểm cốt yếu: lỗi in KHÔNG làm agent chết và KHÔNG bị nuốt — nó được BÁO
@@ -468,13 +632,13 @@ func cmdRun(args []string) error {
 func dispatchJob(
 	ctx context.Context,
 	client *transport.Client,
-	workers map[int]chan *transport.Job,
+	routes map[int]*deviceGroup,
 	job *transport.Job,
 ) {
 	// Máy in vừa bị gỡ ở ERP nhưng lệnh cũ còn trong hàng đợi. Báo hỏng chứ KHÔNG
 	// im lặng bỏ qua: im lặng thì job nằm `sent` tới khi bị thu hồi rồi giao lại,
 	// lặp vô hạn mà không ai thấy lý do. Ghép lại rồi khởi động lại là xong.
-	ch, ok := workers[job.PrinterID]
+	g, ok := routes[job.PrinterID]
 	if !ok {
 		reportErr(ctx, client, job.ID, fmt.Errorf(
 			"máy tính này không cầm máy in id %d — chạy `pair` lại rồi khởi động lại dịch vụ",
@@ -482,11 +646,11 @@ func dispatchJob(
 		return
 	}
 
-	// Gửi KHÔNG chờ. Hàng đầy nghĩa là máy in đó đang tắc thật (kẹt giấy, treo giữa
-	// lần ghi) — báo hỏng để ERP tính lượt thử lại, còn hơn chặn vòng lặp và kéo theo
-	// mọi máy in khác.
+	// Gửi KHÔNG chờ. Hàng đầy nghĩa là thiết bị đó đang tắc thật (kẹt giấy, treo
+	// giữa lần ghi) — báo hỏng để ERP tính lượt thử lại, còn hơn chặn vòng lặp và
+	// kéo theo mọi thiết bị khác.
 	select {
-	case ch <- job:
+	case g.jobs <- job:
 	default:
 		reportErr(ctx, client, job.ID, fmt.Errorf(
 			"máy in id %d đang tắc, hàng đợi tại quầy đã đầy — kiểm tra giấy và dây",
@@ -494,26 +658,22 @@ func dispatchJob(
 	}
 }
 
-// printerWorker in tuần tự cho ĐÚNG MỘT máy in.
+// deviceWorker in tuần tự cho ĐÚNG MỘT thiết bị vật lý.
 //
-// Tuần tự trong phạm vi một máy in là cố ý: hai tờ bill chen nhau vào cùng device
-// node cho ra một tờ ký tự rác. Nhưng giữa các máy in thì độc lập hoàn toàn.
-func printerWorker(
-	ctx context.Context,
-	client *transport.Client,
-	p printer.Printer,
-	printerID int,
-	jobs <-chan *transport.Job,
-) {
+// Tuần tự trong phạm vi một thiết bị là cố ý và nay là BẮT BUỘC: hai lệnh ghi
+// chen nhau vào cùng device node thì một cái ăn EBUSY (usblp chỉ cho một tiến
+// trình mở), hoặc tệ hơn là ra một tờ ký tự rác. Giữa các thiết bị thì độc lập
+// hoàn toàn.
+func deviceWorker(ctx context.Context, client *transport.Client, g *deviceGroup) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case job := <-jobs:
+		case job := <-g.jobs:
 			payload, err := job.Payload()
 			if err == nil {
-				logf("job %d: in %d byte ra máy in id %d", job.ID, len(payload), printerID)
-				err = p.Write(payload)
+				logf("job %d: in %d byte ra máy in id %d (%s)", job.ID, len(payload), job.PrinterID, g.label)
+				err = g.printer.Write(payload)
 			}
 			if err != nil {
 				logf("job %d: LỖI %v", job.ID, err)
@@ -536,12 +696,17 @@ func reportErr(ctx context.Context, client *transport.Client, jobID int64, cause
 	}
 }
 
-// heartbeatLoop báo máy quầy còn sống + thăm cổng TỪNG máy in.
+// heartbeatLoop báo máy quầy còn sống + thăm cổng TỪNG THIẾT BỊ.
+//
+// Thăm theo thiết bị chứ không theo máy in ERP: hai vai trò dùng chung một máy
+// mà thăm hai lần thì cú thăm này sẽ va EBUSY với cú in kia, đẻ ra báo động giả
+// "máy in mất kết nối" ngay giữa lúc máy in đang chạy tốt. Thăm một lần rồi
+// báo cùng một kết quả cho mọi máy in ERP trỏ vào nó.
 func heartbeatLoop(
 	ctx context.Context,
 	client *transport.Client,
-	printers map[int]printer.Printer,
-	cfg *config.Config,
+	groups map[string]*deviceGroup,
+	routes map[int]*deviceGroup,
 ) {
 	t := time.NewTicker(heartbeatEvery)
 	defer t.Stop()
@@ -550,18 +715,29 @@ func heartbeatLoop(
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			// Đi theo thứ tự trong cấu hình chứ không duyệt map: map trong Go trả
-			// thứ tự ngẫu nhiên, mà nhật ký đọc dễ hơn khi thứ tự cố định.
-			status := make([]transport.PrinterStatus, 0, len(cfg.Printers))
-			for _, b := range cfg.Printers {
-				p, ok := printers[b.PrinterID]
+			// Thăm mỗi thiết bị đúng một lần. Gửi buffer RỖNG: mở được device /
+			// kết nối được TCP là máy in sống, mà không tốn một milimet giấy nào.
+			probed := make(map[string]error, len(groups))
+			for key, g := range groups {
+				probed[key] = g.printer.Write(nil)
+			}
+
+			// Đi theo thứ tự printer_id đã sắp để nhật ký đọc dễ; map trong Go
+			// trả thứ tự ngẫu nhiên.
+			ids := make([]int, 0, len(routes))
+			for id := range routes {
+				ids = append(ids, id)
+			}
+			sort.Ints(ids)
+
+			status := make([]transport.PrinterStatus, 0, len(ids))
+			for _, id := range ids {
+				g := routes[id]
+				portErr, ok := probed[g.key]
 				if !ok {
 					continue
 				}
-				// Gửi buffer RỖNG để thăm cổng: mở được device/kết nối được TCP là
-				// máy in sống, mà không tốn một milimet giấy nào.
-				portErr := p.Write(nil)
-				s := transport.PrinterStatus{PrinterID: b.PrinterID, PortOK: portErr == nil}
+				s := transport.PrinterStatus{PrinterID: id, PortOK: portErr == nil}
 				if portErr != nil {
 					s.LastErr = portErr.Error()
 				}

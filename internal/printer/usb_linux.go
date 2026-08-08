@@ -4,6 +4,7 @@ package printer
 
 import (
 	"fmt"
+	"sync"
 	"syscall"
 )
 
@@ -15,21 +16,73 @@ import (
 // đi qua CUPS chỉ thêm một tầng có thể bóp méo byte. Ghi thẳng device là đường
 // ngắn nhất và dễ suy luận nhất khi có sự cố.
 type usbPrinter struct {
-	path string
+	path     string    // đường dẫn ghi trong cấu hình — GỢI Ý khi chưa có danh tính
+	identity *Identity // nil = cấu hình đời cũ, chạy theo `path` như trước
+
+	mu       sync.Mutex
+	lastPath string // đường dẫn đã phân giải lần gần nhất, để biết khi nào nó ĐỔI
 }
 
-// Write mở device, ghi trọn buffer, đóng.
+// Write phân giải danh tính → mở device → ghi trọn buffer → đóng.
 //
 // Mở-ghi-đóng từng lần thay vì giữ handle mở suốt: máy in nhiệt hay bị rút
 // nguồn/cắm lại giữa ca. Giữ handle thì sau khi cắm lại nó trỏ vào device đã
 // chết mà không báo lỗi rõ; mở lại mỗi lần thì lần in kế tiếp tự nhận device
 // mới. Bill in mỗi vài phút nên chi phí mở file là không đáng kể.
 func (p *usbPrinter) Write(b []byte) error {
-	dev, err := openDevice(p.path)
+	path, err := p.resolvePath()
 	if err != nil {
 		return err
 	}
-	return writeUSB(dev, b, p.path)
+	dev, err := openDevice(path)
+	if err != nil {
+		return err
+	}
+	return writeUSB(dev, b, path)
+}
+
+// resolvePath tìm chỗ chiếc máy này ĐANG nằm, ngay trước khi ghi.
+//
+// Phân giải TRƯỚC MỖI LẦN IN chứ không chỉ lúc khởi động — đây là điểm cốt lõi
+// của cả đợt sửa. Chỉ phân giải lúc khởi động thì rút–cắm giữa ca sẽ lệch lại,
+// mà lần đó KHÔNG có cú khởi động nào để ai đó nghi ngờ: quán chỉ thấy tự dưng
+// bill chui ra máy in tem.
+//
+// Chi phí: một lượt quét /dev/usb/lp* + đọc vài tệp sysfs, cỡ mili-giây — không
+// đáng gì so với 15 giây trần ghi USB và bill cỡ 32 KB.
+func (p *usbPrinter) resolvePath() (string, error) {
+	if p.identity == nil || p.identity.IsZero() {
+		return p.path, nil
+	}
+
+	devices, err := Discover()
+	if err != nil {
+		return "", err
+	}
+	res, err := Resolve(*p.identity, devices)
+	if err != nil {
+		return "", err
+	}
+
+	// Nói ra khi có chuyện. "Tự chữa lành trong im lặng" cũng là một dạng hỏng
+	// im lặng: nếu đường dẫn nhảy mỗi lần khởi động mà không ai thấy, thì lúc nó
+	// nhảy SAI cũng chẳng ai thấy.
+	p.mu.Lock()
+	changed := p.lastPath != "" && p.lastPath != res.Device.Path
+	first := p.lastPath == ""
+	p.lastPath = res.Device.Path
+	p.mu.Unlock()
+
+	switch {
+	case changed:
+		Logf("máy in %s đổi chỗ: %s → %s", p.identity.Label(), p.path, res.Device.Path)
+	case first && res.Device.Path != p.path:
+		Logf("máy in %s nay ở %s (cấu hình ghi %s)", p.identity.Label(), res.Device.Path, p.path)
+	}
+	if res.Warning != "" {
+		Logf("máy in %s: %s", p.identity.Label(), res.Warning)
+	}
+	return res.Device.Path, nil
 }
 
 func (p *usbPrinter) String() string { return "usb:" + p.path }

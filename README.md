@@ -40,14 +40,15 @@ trcf-bridge list
 ```
 Thấy 2 máy in:
 
-  [1] Xprinter XP-80C (/dev/usb/lp0)
+  [1] Printer POS-80 · EPSON · SN 1C79EC420000 (/dev/usb/lp0)
       mã thiết bị: 0483:5743
-  [2] Xprinter XP-58IIH (/dev/usb/lp1)
-      mã thiết bị: 0416:5011
-
-⚠ Có nhiều hơn một máy in: tên /dev/usb/lpN có thể đổi chỗ cho nhau
-  sau khi khởi động lại máy. Nên cố định tên bằng udev rule.
+  [2] 4BARCODE 3B-300B · TSPL2 · SN 00270A9D5193 (/dev/usb/lp1)
+      mã thiết bị: 1fc9:2016
 ```
+
+Cột giữa là **ngôn ngữ lệnh** — `EPSON`/`ESC/POS` là máy in bill, `TSPL2`/`ZPL` là máy in tem. Hai thứ tiếng này **không thay thế nhau được**: gửi nhầm thì một bên nhả giấy trắng, bên kia in ra chữ lệnh.
+
+> Đọc từ chuỗi `ieee1284_id` do máy tự khai, **không** từ tên sản phẩm USB — tên USB hay láo. Ở một quán thật, máy in TEM tự xưng là `Printer-80` (nghe hệt máy bill 80mm) còn máy bill thật mang tên vô nghĩa `USB Printer Port`.
 
 Không thấy gì thì nó tự chỉ ra cách chẩn đoán (`lsmod | grep usblp`, `lsusb`).
 
@@ -97,31 +98,67 @@ Lần thứ hai **không** đẻ ra token mới: agent gửi kèm token đang c�
 journalctl -u trcf-bridge -f
 ```
 
-## Cố định tên máy in (udev)
+## Máy in tự cố định theo danh tính
 
-`/dev/usb/lp0` **không ổn định**: rút cắm lại, hoặc bật máy in theo thứ tự khác, là `lp0` và `lp1` đổi chỗ cho nhau — bill của khách chạy ra máy in bếp.
+`/dev/usb/lp0` **không ổn định**: nhân Linux cấp số theo thứ tự tìm thấy, nên rút cắm lại hoặc chỉ đơn giản là khởi động máy cũng làm `lp0` và `lp1` đổi chỗ cho nhau.
 
-Bắt buộc làm khi quán có **từ hai máy in USB trở lên**. Lấy mã thiết bị từ `list`, rồi:
+**Agent tự xử lý chuyện này** — không cần udev, không cần làm gì thêm.
+
+Lúc ghép nối, agent đọc **danh tính** của thiết bị và lưu cùng cấu hình:
+
+```jsonc
+"printer": {
+  "kind": "usb",
+  "target": "/dev/usb/lp0",          // chỗ nó nằm hôm đó — chỉ là gợi ý
+  "identity": {                       // CHIẾC MÁY đó là ai — bền vững
+    "serial": "1C79EC420000",
+    "cmd": "EPSON",
+    "ids": "0483:5743",
+    "usb_path": "1-3",
+    "model": "POS-80"
+  }
+}
+```
+
+Rồi **trước MỖI lệnh in**, agent quét lại `/dev/usb/lp*` và tìm đúng chiếc máy đó — hôm nay nó ở `lp0` hay `lp7` đều in đúng.
+
+Ba nhánh, nhánh nào cũng rõ ràng:
+
+| Kết quả dò | Agent làm gì |
+|---|---|
+| khớp đúng 1 | ghi vào đó |
+| **khớp 0** | **báo hỏng lệnh in kèm tên máy** — tuyệt đối không ghi bừa vào máy còn lại |
+| **khớp ≥2** | từ chối, đòi chọn lại bên ERP |
+
+> Vì sao nhánh "khớp 0" quan trọng: trước đây agent ghi mù vào đường dẫn cũ, nên khi hai máy đổi chỗ thì lệnh in **tem** (TSPL2) chảy vào **máy bill** (ESC/POS) và máy bill in ra nguyên văn chữ lệnh — một tờ giấy đầy `SIZE`, `GAP`, `TEXT`, `PRINT 1`. Nay nó báo lỗi thay vì tốn giấy.
+
+**Máy in không khai số sê-ri** vẫn dùng được: agent rơi về khoá lùi `idVendor:idProduct` + vị trí cổng USB. Đổi cổng thì mất khớp — lúc đó chọn lại thiết bị bên ERP.
+
+### Nâng cấp từ bản cũ
+
+Cấu hình đời cũ chỉ có `target`. Agent bản mới **tự chữa**: đọc danh tính của thiết bị đang nằm ở đường dẫn đó rồi ghi lại — không ai phải gõ gì. Nếu đường dẫn cũ **không còn thiết bị nào** thì agent **không đoán**: nó báo lỗi rõ và chờ người chọn lại.
+
+`target` được **giữ nguyên** trong cấu hình, nên bản binary cũ vẫn đọc được cấu hình mới — hạ cấp binary là đường lùi đủ.
+
+### Nhiều máy in ERP trên một máy vật lý
+
+Hợp lệ và được hỗ trợ: một máy POS-80 có thể vừa là "Bill quầy" vừa là "Phiếu bếp". Ghép hai lần với hai mã, cùng `--device`.
+
+Agent gom chúng vào **một hàng đợi dùng chung** (vì `usblp` chỉ cho một tiến trình mở thiết bị tại một thời điểm), nên hai lệnh in bắn cùng lúc sẽ ra giấy nối tiếp thay vì một cái ăn `EBUSY`.
+
+> ⚠️ Đánh đổi phải nói trước với chủ quán: gộp hai vai trò vào một máy thì **kẹt giấy chặn cả hai**. Đó là vật lý, không phải phần mềm. Hai máy in khác nhau vẫn chạy độc lập hoàn toàn.
+
+### Khi nào vẫn cần udev
+
+Gần như không. Chỉ khi máy in **vừa không khai sê-ri, vừa hay bị đổi cổng USB** — lúc đó dán tên cố định theo cổng:
 
 ```bash
 sudo tee /etc/udev/rules.d/99-trcf-printer.rules > /dev/null <<'EOF'
-# Máy in bill ở quầy — thay idVendor/idProduct bằng mã lấy từ `list`
-SUBSYSTEM=="usbmisc", SUBSYSTEMS=="usb", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="5743", SYMLINK+="trcf-printer-bill", MODE="0660", GROUP="lp"
-# Máy in phiếu bếp
-SUBSYSTEM=="usbmisc", SUBSYSTEMS=="usb", ATTRS{idVendor}=="0416", ATTRS{idProduct}=="5011", SYMLINK+="trcf-printer-kot", MODE="0660", GROUP="lp"
+SUBSYSTEM=="usbmisc", SUBSYSTEMS=="usb", ATTRS{serial}=="1C79EC420000", SYMLINK+="trcf-bill", MODE="0660", GROUP="lp"
 EOF
-
 sudo udevadm control --reload-rules && sudo udevadm trigger
+sudo udevadm test $(udevadm info -q path -n /dev/usb/lp0)   # kiểm, không cần khởi động lại
 ```
-
-Rồi ghép bằng tên cố định:
-
-```bash
-sudo trcf-bridge pair --server http://192.168.1.50 --code 123456 \
-     --device /dev/trcf-printer-bill
-```
-
-> Hai máy in **cùng model** thì `idVendor:idProduct` giống hệt nhau — lúc đó phải phân biệt bằng `ATTRS{serial}` (nếu máy in có số sê-ri) hoặc bằng **cổng USB vật lý** (`KERNELS=="1-3"`, dán nhãn lên cổng để đừng ai cắm đổi).
 
 ## Bố cục
 
