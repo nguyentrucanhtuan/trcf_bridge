@@ -21,6 +21,7 @@ import (
 	"os/signal"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -254,8 +255,12 @@ func usbConfig(path string, known *printer.Identity) printer.Config {
 // Trước đây gửi ĐƯỜNG DẪN ("/dev/usb/lp2"), nên ERP chưa từng nhìn thấy tên máy
 // in nào. Nay gửi danh tính đọc được: "Printer POS-80 · EPSON · SN 1C79EC420000".
 func printerDesc(cfg printer.Config) string {
+	// `Key()` chứ KHÔNG phải `Label()`: chuỗi này về ERP thành `device_key`, và ERP so
+	// nó bằng `===` với khoá trong danh sách thiết bị agent báo mỗi nhịp. Gửi nhãn người
+	// đọc thì hai chuỗi không bao giờ khớp — ô chọn trên web sẽ báo "thiết bị không còn"
+	// cho một máy in đang in tốt. Nhãn đẹp do ERP tự tra từ kiểm kê.
 	if id := cfg.Identity; id != nil && !id.IsZero() {
-		return id.Label()
+		return id.Key()
 	}
 	return cfg.Target
 }
@@ -415,6 +420,11 @@ const (
 	backoffMin     = 2 * time.Second
 	backoffMax     = 60 * time.Second
 	heartbeatEvery = 30 * time.Second
+
+	// Trần chờ lệnh in dở xong khi nạp lại bản gán. Hơn gấp đôi mức treo tệ nhất đã
+	// biết của một cú ghi vào device node (~15 giây lúc kẹt giấy) — đủ rộng để không
+	// cắt oan, đủ hẹp để bản gán mới không bị một máy in treo giữ làm con tin.
+	drainTimeout = 30 * time.Second
 )
 
 func cmdRun(args []string) error {
@@ -442,6 +452,40 @@ func cmdRun(args []string) error {
 		logf("⚠ %s", w)
 	}
 
+	client := transport.New(cfg.ServerURL, cfg.Token, version)
+
+	// Ctrl-C / systemd stop → dừng gọn, không cắt ngang giữa lúc đang ghi ra
+	// máy in (dở dang = bill cụt).
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// Vòng PHIÊN. Mỗi phiên là một bộ thợ ứng với một bản gán; đổi gán trên web thì
+	// phiên hiện tại rút lui gọn rồi phiên mới dựng lại theo cấu hình vừa ghi (047f).
+	//
+	// Nạp lại TRONG tiến trình, không tự thoát để chờ systemd bật lại: agent còn được
+	// chạy tay trong terminal lúc lắp đặt, và một tiến trình tự thoát ở đó là chết hẳn.
+	for {
+		reload, err := runSession(ctx, client, cfg, *cfgPath)
+		if err != nil || !reload {
+			return err
+		}
+		fresh, err := config.Load(*cfgPath)
+		if err != nil {
+			return fmt.Errorf("nạp lại cấu hình sau khi ERP đổi bản gán: %w", err)
+		}
+		cfg = fresh
+		logf("── nạp lại theo bản gán mới: %d máy in ──", len(cfg.Printers))
+	}
+}
+
+// runSession chạy MỘT bản gán cho tới khi bị dừng (`reload=false`) hoặc tới khi ERP
+// đổi bản gán (`reload=true`).
+func runSession(
+	ctx context.Context,
+	client *transport.Client,
+	cfg *config.Config,
+	cfgPath string,
+) (bool, error) {
 	// Gom máy in ERP theo THIẾT BỊ VẬT LÝ. `Open` cố ý không kiểm tra thiết bị có
 	// tồn tại hay không (xem `openUSB`), nên một máy in đang tắt cũng không cản
 	// agent khởi động — lỗi sẽ hiện ra ở từng lần in.
@@ -450,14 +494,11 @@ func cmdRun(args []string) error {
 	// không in được gì: ghi lại rồi đi tiếp, chỉ bỏ cuộc khi không mở nổi máy nào.
 	groups, routes, err := groupByDevice(cfg)
 	if err != nil {
-		return err
+		return false, err
 	}
-	client := transport.New(cfg.ServerURL, cfg.Token, version)
 
-	// Ctrl-C / systemd stop → dừng gọn, không cắt ngang giữa lúc đang ghi ra
-	// máy in (dở dang = bill cụt).
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	sctx, scancel := context.WithCancel(ctx)
+	defer scancel()
 
 	logf("khởi động %s — ERP %s, %d máy in trên %d thiết bị", version, cfg.ServerURL, len(cfg.Printers), len(groups))
 	for _, b := range cfg.Printers {
@@ -482,23 +523,41 @@ func cmdRun(args []string) error {
 	// Đánh đổi phải nói trước với chủ quán: gộp hai vai trò vào MỘT máy vật lý thì
 	// kẹt giấy chặn cả hai. Đó là vật lý, không phải phần mềm.
 	// ─────────────────────────────────────────────────────────────────────
+	var wg sync.WaitGroup
 	for _, g := range groups {
-		go deviceWorker(ctx, client, g)
+		wg.Add(1)
+		go func(g *deviceGroup) {
+			defer wg.Done()
+			deviceWorker(sctx, client, g)
+		}(g)
 	}
 
-	go heartbeatLoop(ctx, client, groups, routes)
+	// Báo về khi ERP đổi bản gán. Đệm 1 để nhịp sống không bị chặn nếu vòng chính đang
+	// treo trong một cú long-poll.
+	reload := make(chan struct{}, 1)
+	go heartbeatLoop(sctx, client, groups, routes, cfgPath, reload)
 
 	backoff := backoffMin
 	for {
 		if ctx.Err() != nil {
 			logf("dừng theo yêu cầu")
-			return nil
+			return false, nil
+		}
+		// Kiểm GIỮA hai cú long-poll, không cắt ngang cú đang chạy: cắt ngang thì có
+		// cửa sổ mà ERP vừa giao một lệnh in cho một socket đã đóng → lệnh nằm `sent`
+		// → hai phút sau bị thu hồi và IN LẠI TỜ THỨ HAI. Đổi lấy tối đa một nhịp
+		// long-poll (25 giây) chậm trễ, đúng như spec đã hứa "ở nhịp poll kế".
+		select {
+		case <-reload:
+			drainGroups(groups, &wg)
+			return true, nil
+		default:
 		}
 
-		job, err := client.NextJob(ctx)
+		job, err := client.NextJob(sctx)
 		switch {
 		case err == nil:
-			dispatchJob(ctx, client, routes, job)
+			dispatchJob(sctx, client, routes, job)
 			backoff = backoffMin // gọi được ERP = mạng lành, reset chờ
 			continue
 		case errors.Is(err, transport.ErrNoJob):
@@ -506,15 +565,40 @@ func cmdRun(args []string) error {
 			backoff = backoffMin
 			continue
 		case ctx.Err() != nil:
-			return nil
+			return false, nil
 		}
 
 		// Chỉ tới đây mới là lỗi thật (mất mạng, ERP tắt, token hỏng).
 		logf("lỗi: %v — thử lại sau %s", err, backoff)
 		if !sleepCtx(ctx, backoff) {
-			return nil
+			return false, nil
 		}
 		backoff = min(backoff*2, backoffMax)
+	}
+}
+
+/*
+drainGroups đóng hàng đợi rồi CHỜ thợ in nốt phần còn lại, trước khi phiên mới dựng lên.
+
+Chờ chứ không cắt: một lệnh in đang dở mà bị bỏ giữa chừng sẽ nằm ở trạng thái `sent`
+bên ERP, và hai phút sau `reclaimStuckJobs` đưa nó về hàng đợi — in ra TỜ THỨ HAI cho
+cùng một đơn, mà tờ đầu đã nằm trong tay khách nên không ai đối chiếu ra được.
+
+Trần 30 giây vì `Write` vào device node có thể treo tới 15 giây khi kẹt giấy: quá mốc
+này thì nhiều khả năng máy in đã treo hẳn, và giữ phiên cũ mãi còn tệ hơn — bản gán mới
+không bao giờ có hiệu lực.
+*/
+func drainGroups(groups map[string]*deviceGroup, wg *sync.WaitGroup) {
+	logf("đang chờ các lệnh in dở xong trước khi nạp lại…")
+	for _, g := range groups {
+		close(g.jobs)
+	}
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(drainTimeout):
+		logf("⚠ quá %s vẫn còn lệnh in chưa xong — nạp lại luôn; lệnh đó có thể bị ERP cho in lại", drainTimeout)
 	}
 }
 
@@ -669,7 +753,13 @@ func deviceWorker(ctx context.Context, client *transport.Client, g *deviceGroup)
 		select {
 		case <-ctx.Done():
 			return
-		case job := <-g.jobs:
+		case job, ok := <-g.jobs:
+			// Hàng đợi đóng = phiên đang rút lui để nạp bản gán mới. Kênh có đệm nên
+			// các lệnh còn xếp hàng vẫn được giao hết TRƯỚC khi `ok` thành false —
+			// đó chính là phép rút lui không đánh rơi lệnh in.
+			if !ok {
+				return
+			}
 			payload, err := job.Payload()
 			if err == nil {
 				logf("job %d: in %d byte ra máy in id %d (%s)", job.ID, len(payload), job.PrinterID, g.label)
@@ -702,12 +792,20 @@ func reportErr(ctx context.Context, client *transport.Client, jobID int64, cause
 // mà thăm hai lần thì cú thăm này sẽ va EBUSY với cú in kia, đẻ ra báo động giả
 // "máy in mất kết nối" ngay giữa lúc máy in đang chạy tốt. Thăm một lần rồi
 // báo cùng một kết quả cho mọi máy in ERP trỏ vào nó.
+// Nó cũng là chỗ agent GỬI KIỂM KÊ máy in đang cắm và NHẬN biết ERP đã đổi bản gán
+// (047f) — cả hai đi nhờ nhịp có sẵn, không mở thêm vòng lặp nào.
 func heartbeatLoop(
 	ctx context.Context,
 	client *transport.Client,
 	groups map[string]*deviceGroup,
 	routes map[int]*deviceGroup,
+	cfgPath string,
+	reload chan<- struct{},
 ) {
+	// -1 chứ không phải 0: máy quầy nào cũng bắt đầu ở rev 0 bên ERP, nên khởi đầu bằng
+	// 0 sẽ khiến nhịp đầu tiên coi là "không có gì đổi" và bỏ qua đúng lần đồng bộ đầu.
+	// Đó là lần quan trọng nhất — lần một quán cài từ trước bắt kịp bản gán trên ERP.
+	lastRev := -1
 	t := time.NewTicker(heartbeatEvery)
 	defer t.Stop()
 	for {
@@ -743,11 +841,114 @@ func heartbeatLoop(
 				}
 				status = append(status, s)
 			}
-			if err := client.Heartbeat(ctx, status); err != nil {
+			rev, err := client.Heartbeat(ctx, status, inventory())
+			if err != nil {
 				logf("heartbeat lỗi: %v", err)
+				continue
+			}
+			if rev == lastRev {
+				continue
+			}
+			changed, err := syncBindings(ctx, client, cfgPath)
+			if err != nil {
+				// KHÔNG cập nhật `lastRev`: chưa đồng bộ được thì nhịp sau phải thử lại,
+				// nếu không thì một lần mạng chập làm bản gán mới kẹt tới lần đổi kế tiếp.
+				logf("tải bản gán từ ERP lỗi: %v", err)
+				continue
+			}
+			lastRev = rev
+			if changed {
+				// Không chặn: vòng chính có thể đang treo trong một cú long-poll, và nhịp
+				// sống tuyệt đối không được đứng lại vì chuyện đó.
+				select {
+				case reload <- struct{}{}:
+				default:
+				}
 			}
 		}
 	}
+}
+
+/*
+inventory — máy in đang cắm ở máy này, để ERP đổ vào ô chọn trên web (047f, CAP-5).
+
+Trả `nil` (⇒ không gửi trường `devices`) khi KHÔNG DÒ ĐƯỢC, và mảng rỗng khi dò được
+mà không có máy nào. Phân biệt này đi thẳng xuống tận cột JSONB của ERP: `nil` để ERP
+giữ nguyên danh sách cũ, `[]` để ERP xoá. Gộp hai thứ lại thì một lần đọc sysfs hỏng sẽ
+xoá sạch ô chọn của người dùng và họ tưởng máy in đã rút.
+
+Bỏ qua thiết bị KHÔNG khai được danh tính: gán vào một thiết bị không phân giải nổi thì
+lệnh in nào cũng hỏng, nên bày nó ra ô chọn chỉ là mời người dùng chọn một thứ chắc chắn
+sai. Vẫn nói ra ở nhật ký để người lắp biết đường mà tra.
+*/
+func inventory() []transport.DeviceInfo {
+	found, err := printer.Discover()
+	if err != nil {
+		logf("không dò được máy in để báo lên ERP: %v", err)
+		return nil
+	}
+	out := make([]transport.DeviceInfo, 0, len(found))
+	for _, f := range found {
+		if f.Identity.IsZero() {
+			logf("⚠ %s không khai danh tính — không đưa vào danh sách chọn trên web", f.Path)
+			continue
+		}
+		id := f.Identity
+		out = append(out, transport.DeviceInfo{
+			DeviceKey: id.Key(),
+			Path:      f.Path,
+			Model:     id.Model,
+			Mfg:       id.Mfg,
+			CMD:       id.CMD,
+			Serial:    id.Serial,
+			IDs:       id.IDs,
+			USBPath:   id.USBPath,
+		})
+	}
+	return out
+}
+
+/*
+syncBindings kéo bản gán ERP đang giữ về rồi ghi xuống tệp cấu hình (047f, CAP-6).
+
+Đọc lại cấu hình TỪ TỆP chứ không sửa bản đang nằm trong bộ nhớ của phiên: phiên đang
+chạy dùng bản của nó để phục vụ máy in, và sửa nóng dưới chân nó là cách đẻ ra những lỗi
+chỉ xuất hiện lúc quán đông khách. Ghi xong thì phiên mới đọc lại từ tệp — một chiều,
+không có trạng thái dùng chung.
+*/
+func syncBindings(ctx context.Context, client *transport.Client, cfgPath string) (bool, error) {
+	rev, remote, err := client.Bindings(ctx)
+	if err != nil {
+		return false, err
+	}
+	if remote == nil {
+		return false, nil // ERP bản cũ chưa có đường này — chạy theo cấu hình cục bộ
+	}
+
+	cur, err := config.Load(cfgPath)
+	if err != nil {
+		return false, err
+	}
+	assigns := make([]config.DeviceAssignment, 0, len(remote))
+	for _, r := range remote {
+		assigns = append(assigns, config.DeviceAssignment{PrinterID: r.PrinterID, DeviceKey: r.DeviceKey})
+	}
+
+	changed, warnings := cur.ApplyBindings(assigns)
+	for _, w := range warnings {
+		logf("⚠ %s", w)
+	}
+	if !changed {
+		return false, nil
+	}
+	if err := config.Save(cfgPath, cur); err != nil {
+		return false, err
+	}
+	logf("ERP đổi bản gán (bản %d) — đã ghi %s", rev, cfgPath)
+	for _, b := range cur.Printers {
+		logf("  máy in id %d → %s", b.PrinterID, describeBinding(b))
+	}
+	return true, nil
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) bool {

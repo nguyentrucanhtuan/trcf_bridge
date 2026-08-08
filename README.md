@@ -142,11 +142,35 @@ Cấu hình đời cũ chỉ có `target`. Agent bản mới **tự chữa**: đ
 
 ### Nhiều máy in ERP trên một máy vật lý
 
-Hợp lệ và được hỗ trợ: một máy POS-80 có thể vừa là "Bill quầy" vừa là "Phiếu bếp". Ghép hai lần với hai mã, cùng `--device`.
+Hợp lệ và được hỗ trợ: một máy POS-80 có thể vừa là "Bill quầy" vừa là "Phiếu bếp". Ghép hai lần với hai mã, cùng `--device` — hoặc **chọn thẳng trên web** (xem mục dưới), không cần ra quầy.
 
 Agent gom chúng vào **một hàng đợi dùng chung** (vì `usblp` chỉ cho một tiến trình mở thiết bị tại một thời điểm), nên hai lệnh in bắn cùng lúc sẽ ra giấy nối tiếp thay vì một cái ăn `EBUSY`.
 
 > ⚠️ Đánh đổi phải nói trước với chủ quán: gộp hai vai trò vào một máy thì **kẹt giấy chặn cả hai**. Đó là vật lý, không phải phần mềm. Hai máy in khác nhau vẫn chạy độc lập hoàn toàn.
+
+### Chọn máy in trên web
+
+Không phải SSH vào quán nữa. Mỗi 30 giây agent gửi lên ERP **danh sách máy in đang cắm**; ở màn **Máy in** → menu thao tác → **Chọn máy in vật lý**, quản lý chọn chiếc nào ăn lệnh in nào.
+
+```
+Trình duyệt ──▶ ERP ◀── (agent gọi ra) ── trcf_bridge ──▶ /dev/usb/lpN
+```
+
+Chiều gọi vẫn chỉ có một: **agent gọi ra, ERP không bao giờ gọi vào**. Không mở cổng ở quán, không IP tĩnh. Đổi lại, danh sách trên web **trễ tối đa một nhịp** (30 giây) — cắm máy in mới thì chờ chút rồi tải lại trang.
+
+Sau khi bấm Lưu, agent thấy bản gán đổi ở nhịp kế, tải về, ghi vào `config.json` rồi **tự nạp lại** — không phải khởi động lại dịch vụ. Lệnh in đang chạy dở được in nốt trước khi nạp lại.
+
+Ba điều agent **từ chối làm**, và đều có lý do:
+
+| Tình huống | Hành vi |
+|---|---|
+| Vai trò in không khớp loại máy (gán máy tem cho bill) | **chặn cứng**, không có nút ghi đè — đó chính là tờ giấy đầy chữ lệnh |
+| ERP trả danh sách gán **rỗng** | **giữ nguyên** cấu hình đang chạy + kêu to. Xoá nhầm là cả quán ngừng in mà agent vẫn báo xanh |
+| Khoá thiết bị không đọc được | giữ mục cũ, ghi nhật ký — không dựng bừa một mục hỏng |
+
+Máy quầy đang tắt vẫn lưu được: ERP nói *"đã lưu, sẽ áp dụng khi máy quầy online"* chứ không nói *"xong"*.
+
+> Agent bản cũ (trước 047f) không biết gửi danh sách này. Màn Máy in sẽ gắn nhãn **"chương trình in cần cập nhật"** — cũng là danh sách quán còn phải nâng cấp.
 
 ### Khi nào vẫn cần udev
 

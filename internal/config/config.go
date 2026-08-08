@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 
 	"github.com/nguyentrucanhtuan/trcf_bridge/internal/printer"
 )
@@ -71,6 +73,131 @@ func (c *Config) Upsert(b Binding) {
 	c.Printers = append(c.Printers, b)
 }
 
+// DeviceAssignment — một dòng trong bản gán ERP đang giữ (047f).
+//
+// Kiểu riêng thay vì dùng thẳng kiểu của gói `transport`: gói `config` không được
+// phụ thuộc vào giao thức HTTP, và nhờ vậy `ApplyBindings` kiểm được bằng dữ liệu
+// dựng tay, không cần máy chủ giả.
+type DeviceAssignment struct {
+	PrinterID int
+	DeviceKey string
+}
+
+// ApplyBindings thay bản gán cục bộ bằng bản ERP đang giữ (047f, CAP-6).
+//
+// Thay TRỌN chứ không vá từng dòng: máy in bị gỡ trên web phải biến mất khỏi agent,
+// mà một phép hợp-nhất chỉ-thêm thì không diễn đạt được việc biến mất.
+//
+// ⚠ MỘT NGOẠI LỆ CÓ CHỦ ĐÍCH: danh sách rỗng KHÔNG xoá sạch cấu hình đang chạy. Hai
+// hỏng hóc bất đối xứng nhau — xoá nhầm thì cả quán ngừng in và không ai hiểu vì sao
+// (agent vẫn xanh, vẫn hỏi việc, chỉ là không còn máy in nào); giữ thừa thì một máy in
+// đã gỡ vẫn hỏi việc mà chẳng bao giờ có việc, vô hại. Nên khi ERP nói "không có gì
+// cả" — dấu hiệu của lỗi phía kia hơn là ý định thật — thì giữ nguyên và kêu to.
+//
+// Trả về `changed` (có gì đổi không, để biết có phải ghi tệp và nạp lại hay không) và
+// `warnings` (những dòng phải nói ra cho người đọc nhật ký).
+func (c *Config) ApplyBindings(remote []DeviceAssignment) (changed bool, warnings []string) {
+	if len(remote) == 0 {
+		if len(c.Printers) > 0 {
+			warnings = append(warnings,
+				"ERP báo máy quầy này không cầm máy in nào — GIỮ NGUYÊN cấu hình đang chạy để quán không mất đường in. "+
+					"Nếu thật sự muốn gỡ hết, gỡ từng máy in ở màn Máy in.")
+		}
+		return false, warnings
+	}
+
+	next := make([]Binding, 0, len(remote))
+	for _, r := range remote {
+		old := c.find(r.PrinterID)
+		b, warn := bindingFor(r, old)
+		if warn != "" {
+			warnings = append(warnings, warn)
+		}
+		if b == nil {
+			// Không dựng nổi mục mới: giữ mục cũ nếu có, còn không thì bỏ qua. Bỏ qua
+			// im lặng ở đây là được vì `warn` phía trên đã nói lý do.
+			if old != nil {
+				next = append(next, *old)
+			}
+			continue
+		}
+		next = append(next, *b)
+	}
+
+	if sameBindings(c.Printers, next) {
+		return false, warnings
+	}
+	c.Printers = next
+	return true, warnings
+}
+
+func (c *Config) find(printerID int) *Binding {
+	for i := range c.Printers {
+		if c.Printers[i].PrinterID == printerID {
+			return &c.Printers[i]
+		}
+	}
+	return nil
+}
+
+// bindingFor dựng một mục cấu hình từ một dòng bản gán.
+//
+// `device_key` là chuỗi MỜ với ERP nhưng agent thì phải hiểu, vì chính agent đã dựng
+// ra nó. Ba dạng:
+//   - `usb://…`      → máy in USB, phân giải theo danh tính (đường chính của 047f)
+//   - `host:port`    → máy in LAN, danh tính vốn đã bền vững, không đụng
+//   - còn lại        → không dựng được ⇒ giữ mục cũ + nói ra
+func bindingFor(r DeviceAssignment, old *Binding) (*Binding, string) {
+	key := strings.TrimSpace(r.DeviceKey)
+	if key == "" {
+		if old != nil {
+			return old, ""
+		}
+		return nil, fmt.Sprintf("máy in id %d: ERP chưa gán thiết bị nào — chọn thiết bị ở màn Máy in", r.PrinterID)
+	}
+
+	if strings.HasPrefix(key, "usb://") {
+		id, err := printer.ParseIdentity(key)
+		if err != nil {
+			return nil, fmt.Sprintf("máy in id %d: không đọc được danh tính ERP gửi xuống (%v)", r.PrinterID, err)
+		}
+		b := Binding{PrinterID: r.PrinterID, Printer: printer.Config{Kind: printer.KindUSB, Identity: &id}}
+		// Giữ `target` cũ khi vẫn là USB: nó là gợi ý chỗ nằm gần nhất và là đường lùi
+		// nếu ai đó hạ binary về bản trước 047f.
+		if old != nil && old.Printer.Kind == printer.KindUSB {
+			b.Printer.Target = old.Printer.Target
+		}
+		return &b, ""
+	}
+
+	if netTarget.MatchString(key) {
+		return &Binding{PrinterID: r.PrinterID, Printer: printer.Config{Kind: printer.KindNet, Target: key}}, ""
+	}
+
+	if old != nil {
+		return old, ""
+	}
+	return nil, fmt.Sprintf(
+		"máy in id %d: thiết bị %q không hiểu được (cấu hình đời cũ?) — vào màn Máy in chọn lại thiết bị",
+		r.PrinterID, key)
+}
+
+// `host:port` — đủ hẹp để không nuốt nhầm một đường dẫn device node đời cũ
+// (`/dev/usb/lp0` có dấu `/` nên trượt).
+var netTarget = regexp.MustCompile(`^[^\s/]+:\d{1,5}$`)
+
+func sameBindings(a, b []Binding) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].PrinterID != b[i].PrinterID || a[i].DeviceKey() != b[i].DeviceKey() {
+			return false
+		}
+	}
+	return true
+}
+
 // Load đọc config. Lỗi ở đây phải nói rõ PHẢI LÀM GÌ, vì người đọc nó là kỹ
 // thuật viên đang đứng ở quán lúc 7 giờ sáng, không phải lập trình viên.
 func Load(path string) (*Config, error) {
@@ -133,8 +260,16 @@ func (c *Config) validate() error {
 		if b.PrinterID == 0 {
 			return fmt.Errorf("máy in thứ %d thiếu printer_id", i+1)
 		}
-		if b.Printer.Kind == "" || b.Printer.Target == "" {
-			return fmt.Errorf("máy in thứ %d chưa chọn thiết bị (kind/target rỗng)", i+1)
+		if b.Printer.Kind == "" {
+			return fmt.Errorf("máy in thứ %d chưa chọn loại kết nối (kind rỗng)", i+1)
+		}
+		// Từ 047f, DANH TÍNH mới là địa chỉ; `target` chỉ là chỗ nó nằm hôm nay. Một máy
+		// in gán lần đầu trên web hoàn toàn có thể chưa có `target` nào — agent sẽ tự dò
+		// ra lúc in. Đòi `target` ở đây thì đúng thao tác mà 047f sinh ra để phục vụ lại
+		// làm agent CHẾT ở lần khởi động kế, và cả quán mất đường in vì một tệp cấu hình
+		// hợp lệ.
+		if b.Printer.Target == "" && b.Printer.Identity.IsZeroOrNil() {
+			return fmt.Errorf("máy in thứ %d chưa chọn thiết bị (không có địa chỉ lẫn danh tính)", i+1)
 		}
 	}
 	return nil

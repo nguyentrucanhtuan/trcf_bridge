@@ -105,6 +105,15 @@ func (i Identity) IsZero() bool {
 	return i.Serial == "" && i.CMD == "" && i.IDs == "" && i.USBPath == "" && i.Model == ""
 }
 
+// IsZeroOrNil — dạng gọi được trên con trỏ có thể `nil`.
+//
+// Có riêng hàm này vì `Config.Identity` là con trỏ, và `cfg.Identity != nil &&
+// !cfg.Identity.IsZero()` viết rải rác ở nhiều chỗ là một lời mời quên vế đầu — mà quên
+// thì chương trình hoảng loạn ngay trên đường in.
+func (i *Identity) IsZeroOrNil() bool {
+	return i == nil || i.IsZero()
+}
+
 // MatchKey — khoá gom nhóm cho MỘT CHIẾC MÁY vật lý.
 //
 // Dùng để gom hàng đợi in: nhiều máy in bên ERP (bill + phiếu bếp) có thể cùng

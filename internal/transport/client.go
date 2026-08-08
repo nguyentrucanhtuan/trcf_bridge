@@ -149,29 +149,102 @@ func (c *Client) ReportResult(ctx context.Context, jobID int64, printErr error) 
 // Gửi cả danh sách thay vì một cờ chung: các máy in trên cùng một máy tính hỏng
 // độc lập, gộp lại thì rút dây máy in bếp sẽ kéo máy in bill báo đỏ theo và nhân
 // viên đi kiểm nhầm chỗ.
-func (c *Client) Heartbeat(ctx context.Context, printers []PrinterStatus) error {
-	b, _ := json.Marshal(map[string]any{
+// Kèm theo là KIỂM KÊ máy in đang cắm (047f) — trọn danh sách mỗi nhịp, không gửi
+// delta, để ERP không bao giờ phải suy đoán bên nào đúng khi hai bên lệch nhau.
+//
+// Trả về `bindings_rev` của ERP. ERP bản cũ không có trường này → về 0, và người
+// gọi hiểu là "không có gì để đồng bộ", chạy tiếp theo cấu hình cục bộ.
+func (c *Client) Heartbeat(ctx context.Context, printers []PrinterStatus, devices []DeviceInfo) (int, error) {
+	body := map[string]any{
 		"version":  c.version,
 		"printers": printers,
-	})
+	}
+	// Chỉ gửi khi dò được. `nil` khác `[]`: gửi mảng rỗng lúc chưa dò xong là khẳng
+	// định "quán không cắm máy in nào" — ERP sẽ xoá sạch ô chọn của người dùng.
+	if devices != nil {
+		body["devices"] = devices
+	}
+	b, _ := json.Marshal(body)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/bridge/heartbeat", bytes.NewReader(b))
 	if err != nil {
-		return err
+		return 0, err
 	}
 	c.auth(req)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.shortHTTP.Do(req)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer drain(resp)
 
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("heartbeat: ERP trả mã %d", resp.StatusCode)
+		return 0, fmt.Errorf("heartbeat: ERP trả mã %d", resp.StatusCode)
 	}
-	return nil
+	var out struct {
+		BindingsRev int `json:"bindings_rev"`
+	}
+	// Bỏ qua lỗi giải mã có chủ đích: nhịp sống ĐÃ tới nơi, đó mới là việc chính.
+	// ERP bản cũ trả `{"ok":true}` → rev 0 → không đồng bộ gì, đúng như mong đợi.
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	return out.BindingsRev, nil
+}
+
+// DeviceInfo — một máy in vật lý agent nhìn thấy, gửi lên cho ERP đổ vào ô chọn.
+//
+// `device_key` do AGENT dựng, ERP chỉ lưu và so chuỗi. Giữ nguyên hướng này thì bản
+// Windows sau chỉ cần đổi phía agent.
+type DeviceInfo struct {
+	DeviceKey string `json:"device_key"`
+	Path      string `json:"path,omitempty"`
+	Model     string `json:"model,omitempty"`
+	Mfg       string `json:"mfg,omitempty"`
+	CMD       string `json:"cmd,omitempty"`
+	Serial    string `json:"serial,omitempty"`
+	IDs       string `json:"ids,omitempty"`
+	USBPath   string `json:"usb_path,omitempty"`
+}
+
+// RemoteBinding — một dòng trong bản gán ERP đang giữ.
+type RemoteBinding struct {
+	PrinterID   int    `json:"printer_id"`
+	DeviceKey   string `json:"device_key"`
+	PrinterName string `json:"printer_name"`
+}
+
+// Bindings tải bản gán máy in ↔ thiết bị từ ERP (047f).
+//
+// Chỉ gọi khi `bindings_rev` lệch, nên đường này gần như không chạy — mỗi lần chạy
+// là một lần người ở ERP vừa bấm Lưu.
+func (c *Client) Bindings(ctx context.Context) (int, []RemoteBinding, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/bridge/bindings", nil)
+	if err != nil {
+		return 0, nil, err
+	}
+	c.auth(req)
+
+	resp, err := c.shortHTTP.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer drain(resp)
+
+	// 404 = ERP bản cũ chưa có đường này. Không phải lỗi, chỉ là không có gì để lấy.
+	if resp.StatusCode == http.StatusNotFound {
+		return 0, nil, nil
+	}
+	if resp.StatusCode >= 300 {
+		return 0, nil, fmt.Errorf("tải bản gán: ERP trả mã %d", resp.StatusCode)
+	}
+	var out struct {
+		BindingsRev int             `json:"bindings_rev"`
+		Bindings    []RemoteBinding `json:"bindings"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return 0, nil, fmt.Errorf("tải bản gán: ERP trả dữ liệu lạ: %w", err)
+	}
+	return out.BindingsRev, out.Bindings, nil
 }
 
 func (c *Client) auth(req *http.Request) {
