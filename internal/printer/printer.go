@@ -6,6 +6,7 @@
 package printer
 
 import (
+	"errors"
 	"fmt"
 	"time"
 )
@@ -18,10 +19,50 @@ import (
 // nó tự chữa SAI thì cũng chẳng ai thấy.
 var Logf = func(format string, a ...any) {}
 
-// writeTimeout: trần thời gian cho MỘT lần ghi. Máy in nhiệt hết giấy sẽ ngừng
-// nhận byte và treo lệnh ghi vô hạn — không có trần thì agent đứng im mãi mà
-// không ai biết, đúng kiểu hỏng im lặng PRD §7 cấm.
+// writeTimeout: mốc MỀM cho một lần ghi — quá đây thì bắt đầu lo, chưa kết luận.
+// Máy in nhiệt hết giấy sẽ ngừng nhận byte và treo lệnh ghi vô hạn; không có trần
+// thì agent đứng im mãi mà không ai biết, đúng kiểu hỏng im lặng PRD §7 cấm.
 const writeTimeout = 15 * time.Second
+
+// writeGrace: chờ THÊM chừng này trước khi kết luận là hỏng.
+//
+// Vì sao phải có (sự cố Gác Đờ Rô 2026-08-09, 17/687 bill in lặp): lệnh ghi quá
+// mốc mềm KHÔNG bị huỷ — goroutine ghi vẫn chạy và máy in vẫn đang nhả giấy. Báo
+// hỏng ngay ở giây thứ 15 là nói dối: backend đưa lệnh về hàng đợi rồi gửi lại
+// TRỌN payload, và tờ thứ hai chui ra trong khi tờ thứ nhất còn chưa in xong.
+// Bằng chứng thấy rõ trong nhật ký: lượt thử lại ngay sau đó ăn EBUSY, tức đúng
+// lúc ấy lệnh ghi cũ vẫn đang giữ thiết bị.
+//
+// 45 giây vì đo tại quán: lệnh in "kẹt" thật sự vẫn xong sau 60–90 giây kể từ lúc
+// bắt đầu. Tổng trần cứng 60 giây vẫn nằm gọn dưới mốc thu hồi của backend.
+const writeGrace = 45 * time.Second
+
+// WriteError — lỗi in kèm câu trả lời cho câu hỏi DUY NHẤT backend cần biết để
+// quyết có được tự in lại hay không: **byte đã kịp chạm giấy chưa?**
+//
+// Không phân biệt được hai loại hỏng này thì mọi chính sách thử lại đều sai một
+// nửa: hoặc bỏ mất bill thật, hoặc in ra tờ thứ hai cho đơn đã có bill.
+type WriteError struct {
+	Err error
+	// Delivered = đã đẩy được byte ra máy in (dù chỉ một phần), HOẶC không loại trừ
+	// được khả năng đó. Backend tuyệt đối không tự in lại những lệnh này.
+	Delivered bool
+}
+
+func (e *WriteError) Error() string { return e.Err.Error() }
+func (e *WriteError) Unwrap() error { return e.Err }
+
+// Delivered tra cờ trên. Lỗi KHÔNG phải WriteError đều xảy ra TRƯỚC khi có byte
+// nào đi (phân giải đường dẫn, mở thiết bị, quay số TCP) → an toàn để in lại.
+// Mặc định `false` là chủ đích: nhánh này chỉ dẫn tới "thử lại", mà thử lại một
+// lệnh chưa hề chạm giấy thì không tốn gì.
+func Delivered(err error) bool {
+	var we *WriteError
+	if errors.As(err, &we) {
+		return we.Delivered
+	}
+	return false
+}
 
 // Printer là toàn bộ bề mặt mà agent cần ở một máy in.
 //

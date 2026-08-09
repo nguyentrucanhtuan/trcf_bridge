@@ -131,6 +131,17 @@ func openDevice(path string) (*rawDevice, error) {
 			return nil, fmt.Errorf("không có quyền ghi vào %s — thêm tài khoản chạy agent vào nhóm 'lp' hoặc cài udev rule (xem README)", path)
 		case syscall.EBUSY:
 			return nil, fmt.Errorf("máy in %s đang bị chương trình khác giữ — thường là CUPS; xem README mục gỡ CUPS", path)
+		case syscall.ENODEV, syscall.ENXIO:
+			// ENODEV ≠ ENOENT. Node vẫn nằm trong /dev và sysfs vẫn đọc được (nên bước
+			// dò danh tính phía trên đã khớp đúng serial), nhưng mở ra thì nhân báo
+			// "không có thiết bị" — hình dạng kinh điển của MÁY IN BỊ TẮT NGUỒN trong
+			// khi mạch USB của nó vẫn được cấp điện từ dây, nên vẫn còn trên bus.
+			//
+			// Thiếu nhánh này thì câu lỗi rơi xuống dòng dưới và người ở quán nhận
+			// đúng ba chữ tiếng Anh "no such device" — vô nghĩa với họ, lại còn nghe
+			// như hỏng hóc nặng trong khi việc cần làm chỉ là bật máy in lên.
+			// (Gác Đờ Rô 08/08: 48 hoá đơn hỏng liên tiếp chỉ hiện câu ấy.)
+			return nil, fmt.Errorf("máy in %s đang TẮT hoặc đã rớt kết nối USB — bật nguồn máy in lên, hoặc rút cắm lại dây USB; nếu quán cố ý không dùng máy in này thì vào ERP mục Máy in tắt ô \"Đang bật\" để khỏi dồn lệnh in hỏng", path)
 		}
 		return nil, fmt.Errorf("mở %s: %w", path, err)
 	}

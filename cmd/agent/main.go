@@ -421,10 +421,16 @@ const (
 	backoffMax     = 60 * time.Second
 	heartbeatEvery = 30 * time.Second
 
-	// Trần chờ lệnh in dở xong khi nạp lại bản gán. Hơn gấp đôi mức treo tệ nhất đã
-	// biết của một cú ghi vào device node (~15 giây lúc kẹt giấy) — đủ rộng để không
-	// cắt oan, đủ hẹp để bản gán mới không bị một máy in treo giữ làm con tin.
-	drainTimeout = 30 * time.Second
+	// Trần chờ lệnh in dở xong khi nạp lại bản gán. Phải RỘNG HƠN mức treo tệ nhất
+	// của một cú ghi, nếu không thì chính chỗ này cắt ngang một tờ bill đang in và
+	// ERP in lại tờ thứ hai — đúng thứ mà `writeGrace` sinh ra để chặn (xem nhật ký
+	// dòng dưới: "lệnh đó có thể bị ERP cho in lại").
+	//
+	// 75 giây = 15 (mốc mềm) + 45 (hạn chờ thêm) + 15 dư. Bản trước để 30 giây, hồi
+	// đó một cú ghi trần 15 giây nên 30 là "hơn gấp đôi"; nay trần là 60 nên giữ 30
+	// hoá ra cắt vào GIỮA quãng chờ hợp lệ. Nạp lại bản gán là việc hiếm (đổi cấu
+	// hình máy in), chờ thêm vài chục giây ở đó rẻ hơn một tờ bill sai.
+	drainTimeout = 75 * time.Second
 )
 
 func cmdRun(args []string) error {
@@ -783,7 +789,10 @@ func deviceWorker(ctx context.Context, client *transport.Client, g *deviceGroup)
 			} else {
 				logf("job %d: xong", job.ID)
 			}
-			if rerr := client.ReportResult(ctx, job.ID, err); rerr != nil {
+			// `printer.Delivered(err)` = byte đã kịp ra máy in trước khi hỏng. ERP
+			// dùng cờ này để KHÔNG tự in lại — không có nó thì mọi lỗi giữa chừng
+			// đều đẻ ra tờ thứ hai (sự cố Gác Đờ Rô 2026-08-09).
+			if rerr := client.ReportResult(ctx, job.ID, err, printer.Delivered(err)); rerr != nil {
 				// In được mà báo không được là tình huống xấu: ERP tưởng hỏng và sẽ
 				// cho in lại → ra hai tờ. Ghi rõ để còn lần theo khi có khiếu nại.
 				logf("job %d: KHÔNG báo được kết quả về ERP: %v", job.ID, rerr)
@@ -794,7 +803,9 @@ func deviceWorker(ctx context.Context, client *transport.Client, g *deviceGroup)
 
 func reportErr(ctx context.Context, client *transport.Client, jobID int64, cause error) {
 	logf("job %d: %v", jobID, cause)
-	if rerr := client.ReportResult(ctx, jobID, cause); rerr != nil {
+	// Mọi lối vào đây đều hỏng TRƯỚC khi chạm máy in (không cầm máy in đó, hàng đợi
+	// tại quầy đầy, payload hỏng) → an toàn cho ERP in lại.
+	if rerr := client.ReportResult(ctx, jobID, cause, false); rerr != nil {
 		logf("job %d: KHÔNG báo được kết quả về ERP: %v", jobID, rerr)
 	}
 }

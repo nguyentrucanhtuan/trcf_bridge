@@ -41,9 +41,14 @@ func (p *netPrinter) Write(b []byte) error {
 	}
 
 	// net.Conn.Write đã ghi-cho-tới-hết hoặc trả lỗi, không cần vòng lặp như
-	// device node.
-	if _, err := conn.Write(b); err != nil {
-		return fmt.Errorf("gửi tới máy in mạng %s: %w", addr, err)
+	// device node. Nhưng nó CÓ trả về số byte đã đi — và đó là thứ quyết định
+	// backend có được tự in lại hay không (xem `WriteError`). Hỏng ở byte thứ 0
+	// thì giấy chưa chạy; hỏng giữa chừng thì nửa tờ đã nằm trên khay.
+	if n, err := conn.Write(b); err != nil {
+		return &WriteError{
+			Err:       fmt.Errorf("gửi tới máy in mạng %s (đã gửi %d/%d byte): %w", addr, n, len(b), err),
+			Delivered: n > 0,
+		}
 	}
 	return nil
 }

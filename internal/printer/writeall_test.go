@@ -93,6 +93,71 @@ func TestWriteAllErrorReportsProgress(t *testing.T) {
 	}
 }
 
+// partialThenErrWriter: nuốt được một ít rồi mới hỏng — đúng hình dạng của máy in
+// hết giấy giữa tờ bill.
+type partialThenErrWriter struct {
+	ok  int
+	err error
+}
+
+func (w *partialThenErrWriter) Write(p []byte) (int, error) {
+	if w.ok > 0 {
+		n := min(w.ok, len(p))
+		w.ok -= n
+		return n, nil
+	}
+	return 0, w.err
+}
+
+// Ranh giới quyết định TOÀN BỘ chính sách thử lại của backend (sự cố Gác Đờ Rô
+// 2026-08-09): hỏng ở byte thứ 0 thì giấy chưa hề chạy → in lại được; hỏng sau khi
+// đã đẩy đi byte nào đó thì nửa tờ bill đã nằm trên khay → in lại là ra hai tờ.
+func TestWriteAllPhanLoaiDaChamGiayChua(t *testing.T) {
+	boom := errors.New("input/output error")
+
+	t.Run("hỏng ngay byte đầu → chưa chạm giấy", func(t *testing.T) {
+		err := writeAll(&errWriter{err: boom}, make([]byte, 240), "/dev/usb/lp0")
+		if Delivered(err) {
+			t.Error("chưa gửi byte nào mà báo đã chạm giấy → backend sẽ KHÔNG in lại, mất bill thật")
+		}
+	})
+
+	t.Run("hỏng giữa chừng → đã chạm giấy", func(t *testing.T) {
+		err := writeAll(&partialThenErrWriter{ok: 100, err: boom}, make([]byte, 240), "/dev/usb/lp0")
+		if err == nil {
+			t.Fatal("muốn lỗi")
+		}
+		if !Delivered(err) {
+			t.Error("đã gửi 100/240 byte mà báo chưa chạm giấy → backend tự in lại tờ thứ hai")
+		}
+		if !strings.Contains(err.Error(), "100/240") {
+			t.Errorf("thiếu tiến độ trong thông báo: %v", err)
+		}
+	})
+
+	t.Run("máy in ngừng nhận giữa chừng → đã chạm giấy", func(t *testing.T) {
+		err := writeAll(&partialThenErrWriter{ok: 50}, make([]byte, 240), "/dev/usb/lp0")
+		if err == nil {
+			t.Fatal("muốn lỗi")
+		}
+		if !Delivered(err) {
+			t.Error("đã ra 50 byte rồi mới kẹt → không được tự in lại")
+		}
+	})
+}
+
+// Lỗi KHÔNG phải WriteError (mở thiết bị, quay số TCP) đều xảy ra trước khi có byte
+// nào đi. Mặc định `false` để backend cứ thử lại — thử lại một lệnh chưa chạm giấy
+// thì không tốn gì.
+func TestDeliveredMacDinhLaFalse(t *testing.T) {
+	if Delivered(nil) {
+		t.Error("nil mà báo đã chạm giấy")
+	}
+	if Delivered(errors.New("không thấy máy in tại /dev/usb/lp2")) {
+		t.Error("lỗi mở thiết bị phải coi là chưa chạm giấy để còn in lại được")
+	}
+}
+
 // Buffer rỗng = phép thăm cổng của heartbeat (mở được device là máy in sống),
 // phải thành công mà không tốn giấy.
 func TestWriteAllEmptyIsNoOp(t *testing.T) {

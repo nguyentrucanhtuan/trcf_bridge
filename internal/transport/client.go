@@ -75,6 +75,10 @@ type Client struct {
 	pollHTTP  *http.Client
 	shortHTTP *http.Client
 
+	// Giãn cách giữa hai lượt báo kết quả. Là trường (không phải hằng) để test rút
+	// xuống mili-giây — chờ thật 2 giây mỗi lượt thì không ai chạy test nữa.
+	reportWait time.Duration
+
 	// Số nhịp còn phải NHỊN gửi kiểm kê thiết bị, sau khi ERP từ chối nó.
 	//
 	// ERP bản trước 047f bật `forbidNonWhitelisted`, nên trường `devices` lạ làm
@@ -95,11 +99,12 @@ const devicesRetryEvery = 20
 
 func New(baseURL, token, version string) *Client {
 	return &Client{
-		baseURL:   strings.TrimRight(baseURL, "/"),
-		token:     token,
-		version:   version,
-		pollHTTP:  &http.Client{Timeout: pollTimeout},
-		shortHTTP: &http.Client{Timeout: 10 * time.Second},
+		baseURL:    strings.TrimRight(baseURL, "/"),
+		token:      token,
+		version:    version,
+		pollHTTP:   &http.Client{Timeout: pollTimeout},
+		shortHTTP:  &http.Client{Timeout: 10 * time.Second},
+		reportWait: reportRetryWait,
 	}
 }
 
@@ -140,36 +145,100 @@ func (c *Client) NextJob(ctx context.Context) (*Job, error) {
 	}
 }
 
+// reportAttempts / reportRetryWait — báo kết quả được thử lại vài lượt.
+//
+// Một cú POST hụt (mạng chập, ERP đang khởi động lại) từng đủ để đẻ ra một tờ
+// bill thừa: job nằm `sent`, hai phút sau ERP thu hồi rồi giao lại, agent in tờ
+// thứ hai. Thử lại vài lượt rẻ hơn hẳn một tờ bill sai.
+const (
+	reportAttempts   = 4
+	reportRetryWait  = 2 * time.Second
+	reportRetryLimit = 12 * time.Second
+)
+
 // ReportResult báo kết quả in.
 //
 // Đây là bước KHÔNG ĐƯỢC BỎ: ERP dựa vào nó để đánh dấu job xong hay hỏng, và
 // để hiện "phiếu bếp chưa in được" ở quầy (PRD FR-047.16). In được mà không báo
 // thì ERP tưởng vẫn hỏng và sẽ in lại — ra hai tờ.
-func (c *Client) ReportResult(ctx context.Context, jobID int64, printErr error) error {
+//
+// `mayHavePrinted` = lệnh ghi đã đẩy byte ra máy in (dù chỉ một phần) trước khi
+// hỏng. ERP dùng đúng cờ này để KHÔNG tự in lại — xem `printer.WriteError`.
+func (c *Client) ReportResult(ctx context.Context, jobID int64, printErr error, mayHavePrinted bool) error {
 	body := map[string]any{"ok": printErr == nil}
 	if printErr != nil {
 		body["error"] = printErr.Error()
+		if mayHavePrinted {
+			body["may_have_printed"] = true
+		}
 	}
-	b, _ := json.Marshal(body)
 
 	url := fmt.Sprintf("%s/bridge/jobs/%d/result", c.baseURL, jobID)
+	deadline := time.Now().Add(reportRetryLimit)
+
+	var last error
+	for attempt := 1; attempt <= reportAttempts; attempt++ {
+		if attempt > 1 {
+			if !sleepCtx(ctx, c.reportWait) || time.Now().After(deadline) {
+				return last
+			}
+		}
+
+		retryable, err := c.postResult(ctx, url, body, jobID)
+		if err == nil {
+			return nil
+		}
+		last = err
+
+		// ERP bản CŨ chưa biết trường `may_have_printed` sẽ trả 400 (nó bật
+		// `forbidNonWhitelisted`). Bỏ trường đi rồi báo lại — thà mất một chi tiết
+		// còn hơn để job kẹt `sent`, vì kẹt `sent` chính là đường đẻ ra tờ thứ hai
+		// mà cả đợt sửa này đang bịt.
+		if !retryable {
+			if _, ok := body["may_have_printed"]; ok {
+				delete(body, "may_have_printed")
+				continue
+			}
+			return err
+		}
+	}
+	return last
+}
+
+// postResult gửi một lượt. `retryable` = hỏng vì đường truyền/ERP đang bận, thử
+// lại có cửa thắng. Lỗi 4xx (job không tồn tại, token hỏng) thì thử lại vô ích.
+func (c *Client) postResult(ctx context.Context, url string, body map[string]any, jobID int64) (retryable bool, err error) {
+	b, _ := json.Marshal(body)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(b))
 	if err != nil {
-		return err
+		return false, err
 	}
 	c.auth(req)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.shortHTTP.Do(req)
 	if err != nil {
-		return fmt.Errorf("báo kết quả job %d: %w", jobID, err)
+		return true, fmt.Errorf("báo kết quả job %d: %w", jobID, err)
 	}
 	defer drain(resp)
 
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("báo kết quả job %d: ERP trả mã %d", jobID, resp.StatusCode)
+		return resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests,
+			fmt.Errorf("báo kết quả job %d: ERP trả mã %d", jobID, resp.StatusCode)
 	}
-	return nil
+	return false, nil
+}
+
+// sleepCtx chờ, nhưng bỏ chờ ngay khi agent được lệnh dừng.
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
 }
 
 // Heartbeat cho ERP biết máy quầy còn sống và TỪNG máy in có mở cổng được không
