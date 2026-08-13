@@ -102,7 +102,18 @@ type Config struct {
 func Open(cfg Config) (Printer, error) {
 	switch cfg.Kind {
 	case KindUSB:
-		if cfg.Target == "" {
+		// Đủ MỘT trong hai là mở được, và phải viết đúng như vậy: từ 047f, DANH TÍNH
+		// mới là địa chỉ thật của chiếc máy — `resolvePath` dò lại đường dẫn trước mỗi
+		// lần in và KHÔNG hề đọc `Target`. Đòi `Target` ở đây là hồi sinh luật đời cũ
+		// trên một cấu hình đời mới hợp lệ.
+		//
+		// Gác Dero 2026-08-13: máy in "PHIẾU ĐÓNG CA" gán từ web (chỉ có danh tính, chưa
+		// từng có đường dẫn) bị chốt này loại ở `groupByDevice` → mọi lệnh in của nó
+		// hỏng câm suốt từ tối hôm trước. Nó ngủ yên nhiều ngày vì máy in bill trỏ CÙNG
+		// thiết bị và đứng TRƯỚC trong danh sách nên đã mở hộ; hôm ERP đẩy bản gán mới,
+		// thứ tự đảo lại là mất luôn đường in. Thứ tự một danh sách không được phép
+		// quyết định quán có in được hay không.
+		if cfg.Target == "" && cfg.Identity.IsZeroOrNil() {
 			return nil, fmt.Errorf("chưa chọn máy in USB — chạy `trcf-bridge list` để xem máy in đang cắm")
 		}
 		return openUSB(cfg.Target, cfg.Identity)

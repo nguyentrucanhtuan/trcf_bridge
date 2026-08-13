@@ -3,6 +3,7 @@ package printer
 import (
 	"io"
 	"net"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -78,7 +79,8 @@ func TestOpenRejectsBadConfig(t *testing.T) {
 		wantHas string
 	}{
 		{"kiểu lạ", Config{Kind: "bluetooth", Target: "x"}, "không hợp lệ"},
-		{"usb thiếu target", Config{Kind: KindUSB}, "list"},
+		{"usb không target lẫn danh tính", Config{Kind: KindUSB}, "list"},
+		{"usb danh tính rỗng", Config{Kind: KindUSB, Identity: &Identity{}}, "list"},
 		{"net thiếu target", Config{Kind: KindNet}, "9100"},
 	}
 
@@ -92,5 +94,25 @@ func TestOpenRejectsBadConfig(t *testing.T) {
 				t.Errorf("thông báo %q không chứa %q", err.Error(), tc.wantHas)
 			}
 		})
+	}
+}
+
+// Máy in chỉ có DANH TÍNH, chưa từng có đường dẫn — phải mở được.
+//
+// Đây là ca thật đã hỏng ở Gác Dero 2026-08-13: máy in "PHIẾU ĐÓNG CA" gán từ giao
+// diện web nên cấu hình chỉ mang số sê-ri, `target` rỗng. Chốt chặn đời cũ đòi
+// `target` đã loại nó khỏi vòng gom thiết bị ⇒ mọi lệnh in của nó hỏng câm.
+//
+// Kiểm bằng THÔNG BÁO chứ không bằng "có lỗi hay không", vì đường USB thật chỉ có
+// trên Linux: trên máy dev macOS/Windows `openUSB` trả lỗi "chưa hỗ trợ" — vẫn là
+// đã ĐI QUA được chốt chặn, đúng thứ test này canh.
+func TestOpenUSBChiCoDanhTinhVanMoDuoc(t *testing.T) {
+	p, err := Open(Config{Kind: KindUSB, Identity: &Identity{Serial: "1C79EC420000", Model: "POS-80"}})
+
+	if err != nil && strings.Contains(err.Error(), "chưa chọn máy in USB") {
+		t.Fatalf("danh tính đã đủ để mở máy in, nhưng bị chốt chặn đời cũ loại: %v", err)
+	}
+	if runtime.GOOS == "linux" && (err != nil || p == nil) {
+		t.Fatalf("trên Linux phải dựng được máy in USB từ danh tính: p=%v err=%v", p, err)
 	}
 }
