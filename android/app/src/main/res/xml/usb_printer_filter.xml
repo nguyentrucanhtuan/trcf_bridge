@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Mọi thiết bị USB lớp máy in (7). Cắm máy in vào, Android hỏi "mở bằng TRCF?" —
+     tích "Luôn dùng" một lần là quyền USB được nhớ, kể cả sau khi khởi động lại. -->
+<resources>
+    <usb-device class="7" />
+</resources>

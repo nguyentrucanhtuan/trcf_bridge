@@ -4,88 +4,27 @@ package printer
 
 import (
 	"fmt"
-	"sync"
+	"io"
 	"syscall"
 )
 
-// usbPrinter ghi ESC/POS THẲNG vào device node của nhân Linux (`usblp`),
-// thường là /dev/usb/lp0.
-//
-// Vì sao không đi qua CUPS: CUPS mặc định dựng ảnh raster rồi nhờ driver dịch
-// sang lệnh máy in. Bill của mình ĐÃ là ESC/POS hoàn chỉnh (backend dựng) nên
-// đi qua CUPS chỉ thêm một tầng có thể bóp méo byte. Ghi thẳng device là đường
-// ngắn nhất và dễ suy luận nhất khi có sự cố.
-type usbPrinter struct {
-	path     string    // đường dẫn ghi trong cấu hình — GỢI Ý khi chưa có danh tính
-	identity *Identity // nil = cấu hình đời cũ, chạy theo `path` như trước
+// sysfsBackend — đường USB của Linux: dò qua `/dev/usb/lp*` + sysfs, ghi bằng
+// syscall thô ở chế độ chặn. Tự đăng ký để `run`/`list`/`test` không phải làm gì.
+type sysfsBackend struct{}
 
-	mu       sync.Mutex
-	lastPath string // đường dẫn đã phân giải lần gần nhất, để biết khi nào nó ĐỔI
+func init() { usbBackend = sysfsBackend{} }
+
+func (sysfsBackend) Discover() ([]Found, error) { return discoverSysfs() }
+
+func (sysfsBackend) Open(path string) (io.WriteCloser, error) {
+	d, err := openDevice(path)
+	if err != nil {
+		// Trả nil TRẦN, không bọc `d`: một *rawDevice nil nhét vào interface là
+		// interface KHÁC nil, và bên gọi sẽ ghi vào nó.
+		return nil, err
+	}
+	return d, nil
 }
-
-// Write phân giải danh tính → mở device → ghi trọn buffer → đóng.
-//
-// Mở-ghi-đóng từng lần thay vì giữ handle mở suốt: máy in nhiệt hay bị rút
-// nguồn/cắm lại giữa ca. Giữ handle thì sau khi cắm lại nó trỏ vào device đã
-// chết mà không báo lỗi rõ; mở lại mỗi lần thì lần in kế tiếp tự nhận device
-// mới. Bill in mỗi vài phút nên chi phí mở file là không đáng kể.
-func (p *usbPrinter) Write(b []byte) error {
-	path, err := p.resolvePath()
-	if err != nil {
-		return err
-	}
-	dev, err := openDevice(path)
-	if err != nil {
-		return err
-	}
-	return writeUSB(dev, b, path)
-}
-
-// resolvePath tìm chỗ chiếc máy này ĐANG nằm, ngay trước khi ghi.
-//
-// Phân giải TRƯỚC MỖI LẦN IN chứ không chỉ lúc khởi động — đây là điểm cốt lõi
-// của cả đợt sửa. Chỉ phân giải lúc khởi động thì rút–cắm giữa ca sẽ lệch lại,
-// mà lần đó KHÔNG có cú khởi động nào để ai đó nghi ngờ: quán chỉ thấy tự dưng
-// bill chui ra máy in tem.
-//
-// Chi phí: một lượt quét /dev/usb/lp* + đọc vài tệp sysfs, cỡ mili-giây — không
-// đáng gì so với 15 giây trần ghi USB và bill cỡ 32 KB.
-func (p *usbPrinter) resolvePath() (string, error) {
-	if p.identity == nil || p.identity.IsZero() {
-		return p.path, nil
-	}
-
-	devices, err := Discover()
-	if err != nil {
-		return "", err
-	}
-	res, err := Resolve(*p.identity, devices)
-	if err != nil {
-		return "", err
-	}
-
-	// Nói ra khi có chuyện. "Tự chữa lành trong im lặng" cũng là một dạng hỏng
-	// im lặng: nếu đường dẫn nhảy mỗi lần khởi động mà không ai thấy, thì lúc nó
-	// nhảy SAI cũng chẳng ai thấy.
-	p.mu.Lock()
-	changed := p.lastPath != "" && p.lastPath != res.Device.Path
-	first := p.lastPath == ""
-	p.lastPath = res.Device.Path
-	p.mu.Unlock()
-
-	switch {
-	case changed:
-		Logf("máy in %s đổi chỗ: %s → %s", p.identity.Label(), p.path, res.Device.Path)
-	case first && res.Device.Path != p.path:
-		Logf("máy in %s nay ở %s (cấu hình ghi %s)", p.identity.Label(), res.Device.Path, p.path)
-	}
-	if res.Warning != "" {
-		Logf("máy in %s: %s", p.identity.Label(), res.Warning)
-	}
-	return res.Device.Path, nil
-}
-
-func (p *usbPrinter) String() string { return "usb:" + p.path }
 
 // rawDevice — thiết bị mở bằng SYSCALL THÔ, cố ý KHÔNG dùng `os.File`.
 //

@@ -35,6 +35,15 @@ var (
 // /dev/usb/lpN biến mất và đụng độ trực diện với CUPS — đúng cái bẫy đã tái diễn
 // ở mọi máy quầy.
 func Discover() ([]Found, error) {
+	if usbBackend != nil {
+		return usbBackend.Discover()
+	}
+	return discoverSysfs()
+}
+
+// discoverSysfs — cách dò của Linux (xem `Discover`). Không mang thẻ build để test
+// dựng cây thư mục giả chạy được trên máy dev.
+func discoverSysfs() ([]Found, error) {
 	var paths []string
 	for _, pattern := range devGlobs {
 		m, err := filepath.Glob(pattern)
