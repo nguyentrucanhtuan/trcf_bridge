@@ -13,8 +13,8 @@ android {
         applicationId = "vn.trcf.bridge"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.1.1"
         // Lõi Go đóng gói cho 2 kiến trúc ARM (xem build-core.sh) — máy POS và emulator
         // Apple Silicon đều thuộc nhóm này.
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }

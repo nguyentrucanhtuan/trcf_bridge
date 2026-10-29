@@ -1,10 +1,12 @@
 # TRCF POS — app Android (máy iMin I24D02)
 
-Một app làm ba việc trên máy POS Android:
+App **cầu nối in** cho máy POS Android: in bill và tem ra máy in cắm USB, chạy nền cả
+ngày, tự bật lại sau khi khởi động máy. Màn bán hàng mở bằng trình duyệt như mọi máy khác.
 
-1. **Màn bán hàng**: POS web của TRCF (`/pos-app`) toàn màn hình.
-2. **In bill** ra máy in cắm USB, chạy nền cả ngày, tự bật lại sau khi khởi động máy.
-3. **Màn khách** trên màn phụ: tự hiện giỏ hàng của quầy đang mở ca.
+> Bản 0.1.0 có nhúng màn bán hàng (`/pos-app`) và màn khách trên màn phụ; **đã gỡ ở 0.1.1**.
+> ERP trên cloud tách domain backend với frontend nên trang nhúng mở ra trắng, và nó còn
+> tự bật lên che màn hình mỗi lần cắm máy in hay khởi động máy. Muốn có lại thì xem git
+> history của `MainActivity.kt` + `CustomerDisplay.kt`.
 
 Phần in là **cùng một lõi Go** với `trcf-bridge` trên Linux (`../internal/core`), đóng gói
 bằng gomobile. App chỉ thêm đường USB của Android (`UsbPrinterHost.kt`) và giao diện.
@@ -16,12 +18,13 @@ bằng gomobile. App chỉ thêm đường USB của Android (`UsbPrinterHost.kt
 3. Android hỏi *"Mở TRCF POS khi kết nối thiết bị này?"* → tích **Luôn dùng** → OK.
    (Tích ô này thì sau khởi động lại không phải cho phép lại.)
 4. Mở app → màn thiết lập:
-   - **Địa chỉ ERP**: như trên trình duyệt, vd `http://192.168.1.50`
+   - **Địa chỉ ERP**: địa chỉ có `/bridge/*` vào backend — vd `https://erp.quan.vn`
+     (cloud) hoặc `http://192.168.1.50` (máy chủ trong quán)
    - **Mã ghép**: trên ERP vào **Máy in** → chọn máy in → **Lấy mã ghép**
    - Chọn máy in → **In thử** (giấy ra và đứt rời là đúng) → **Ghép & bắt đầu**
-5. Bấm **Mở màn bán hàng**, đăng nhập, chọn quầy, mở ca. Màn phụ tự hiện màn khách.
 
-Xong. Tắt máy bật lại thì việc in tự chạy, không cần mở app.
+Xong. Tắt máy bật lại thì việc in tự chạy, không cần mở app. Nên vào **Cài đặt → Ứng
+dụng → TRCF POS → Pin → Không hạn chế** để chế độ tiết kiệm pin không chặn dịch vụ in.
 
 **Máy in bếp / máy in thứ hai:** chạm thông báo *"TRCF — đang sẵn sàng in"* → màn thiết
 lập → lấy mã của máy in kia → chọn máy → **Ghép & bắt đầu**. Vẫn một máy quầy bên ERP.

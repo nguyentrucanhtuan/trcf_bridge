@@ -1,7 +1,6 @@
 package vn.trcf.bridge.app
 
 import android.app.Activity
-import android.content.Intent
 import android.graphics.Typeface
 import android.os.Build
 import android.os.Bundle
@@ -24,7 +23,6 @@ import vn.trcf.bridge.trcfcore.Trcfcore
 /**
  * Màn thiết lập DUY NHẤT: nhập địa chỉ ERP + mã 6 số, chọn máy in, bấm Ghép.
  *
- * Ghép xong thì cùng địa chỉ đó dùng để mở màn bán hàng — người lắp chỉ nhập MỘT lần.
  * Mở lại màn này (chạm thông báo "đang sẵn sàng in") để xem nhật ký hoặc ghép THÊM
  * máy in (vd máy in bếp): lõi gửi kèm token cũ nên vẫn một máy quầy bên ERP.
  */
@@ -37,7 +35,6 @@ class SetupActivity : Activity() {
     private lateinit var printerPick: Spinner
     private lateinit var status: TextView
     private lateinit var logView: TextView
-    private lateinit var openPos: Button
     private var printers: List<Pair<String, String>> = emptyList() // key → label
 
     private val refreshLog = object : Runnable {
@@ -61,7 +58,6 @@ class SetupActivity : Activity() {
     override fun onResume() {
         super.onResume()
         ui.post(refreshLog)
-        openPos.visibility = if (App.isPaired(this)) View.VISIBLE else View.GONE
     }
 
     override fun onPause() {
@@ -125,7 +121,6 @@ class SetupActivity : Activity() {
             Trcfcore.stop(90_000)
             ui.post {
                 code.setText("")
-                openPos.visibility = View.VISIBLE
                 App.startBridge(this)
             }
             "✓ Đã ghép với máy in \"$name\". Dịch vụ in đã chạy nền."
@@ -166,7 +161,7 @@ class SetupActivity : Activity() {
         })
         col.addView(label("Địa chỉ ERP"))
         server = EditText(this).apply {
-            hint = "vd http://192.168.1.50"
+            hint = "vd https://erp.quan.vn"
             inputType = InputType.TYPE_TEXT_VARIATION_URI
             isSingleLine = true
         }
@@ -189,15 +184,6 @@ class SetupActivity : Activity() {
 
         status = TextView(this).apply { textSize = 16f; setPadding(0, pad, 0, pad) }
         col.addView(status)
-
-        openPos = Button(this).apply {
-            text = "Mở màn bán hàng"
-            setOnClickListener {
-                startActivity(Intent(this@SetupActivity, MainActivity::class.java))
-                finish()
-            }
-        }
-        col.addView(openPos)
 
         col.addView(label("Nhật ký"))
         logView = TextView(this).apply {
