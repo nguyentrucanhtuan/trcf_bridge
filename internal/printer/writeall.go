@@ -22,6 +22,13 @@ func writeAll(w io.Writer, b []byte, name string) error {
 	for written := 0; written < len(b); {
 		n, err := w.Write(b[written:])
 		if err != nil {
+			// Theo hợp đồng `io.Writer`, lần ghi hỏng vẫn có thể đã đẩy đi `n` byte. Bỏ
+			// qua `n` thì hỏng-giữa-khúc-đầu bị tính là "chưa chạm giấy" → ERP in lại
+			// tờ thứ hai. Syscall Linux hỏng luôn trả 0 nên chưa từng lộ; USB Android
+			// (bulkTransfer chia khúc) thì trả được n > 0 kèm lỗi.
+			if n > 0 {
+				written += min(n, len(b)-written)
+			}
 			return &WriteError{
 				Err:       fmt.Errorf("ghi %s (đã gửi %d/%d byte): %w", name, written, len(b), err),
 				Delivered: written > 0,

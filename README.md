@@ -17,7 +17,7 @@ và không còn nằm cùng mạng LAN với thiết bị.
 
 PRD: [`prd-46-print-agent-2026-08-02`](../_bmad-output/planning-artifacts/prds/prd-46-print-agent-2026-08-02/prd.md) · Nền nghiên cứu: [báo cáo kỹ thuật](../_bmad-output/planning-artifacts/research/technical-in-hoa-don-may-in-nhiet-usb-docker-research-2026-08-02.md)
 
-**Trạng thái:** Linux xong (`list` / `test` / `pair` / `run`), đã nối được với ERP (backend 047-B) và một máy tính cầm được nhiều máy in (047-D). Windows là đợt sau. `list` và `test` chạy được **không cần ERP**, để kiểm tra máy in thật ngay lúc lắp.
+**Trạng thái:** Linux xong (`list` / `test` / `pair` / `run`), đã nối được với ERP (backend 047-B) và một máy tính cầm được nhiều máy in (047-D). **Android xong (047-G)**: app trong [`android/`](android/README.md) cho máy POS iMin, dùng CHUNG lõi `internal/core` qua gomobile, kiêm màn bán hàng và màn khách trên màn phụ. Windows là đợt sau. `list` và `test` chạy được **không cần ERP**, để kiểm tra máy in thật ngay lúc lắp.
 
 ## Nguyên tắc: cầu nối phải ngu
 
@@ -187,8 +187,10 @@ sudo udevadm test $(udevadm info -q path -n /dev/usb/lp0)   # kiểm, không c�
 ## Bố cục
 
 ```
-cmd/agent/           4 lệnh: list · test · pair · run
-internal/printer/    interface Write([]byte) — 3 cài đặt: usb_linux · net · stub
+cmd/agent/           vỏ Linux: 4 lệnh list · test · pair · run (run chỉ gọi core.Run)
+internal/core/       VÒNG CHẠY DÙNG CHUNG mọi nền tảng: long-poll, hàng đợi theo thiết bị,
+                     heartbeat, đồng bộ bản gán + nạp lại, tự chữa cấu hình đời cũ
+internal/printer/    interface Write([]byte) — usb (dùng chung) · net · USBBackend theo nền tảng
 internal/escpos/     trang in thử + cắt giấy + đá két (KHÔNG dựng bill)
 internal/config/     config.json (server_url, token, printers[], drawer_pin)
 internal/transport/  long-poll + báo kết quả + heartbeat
@@ -196,11 +198,22 @@ internal/pair/       đổi mã 6 số lấy token
 internal/service/    cài systemd unit
 ```
 
-Toàn bộ khác biệt USB/LAN/Windows/Linux gói trong **một interface**:
+Toàn bộ khác biệt USB/LAN/Windows/Linux/Android gói trong **hai interface**:
 
 ```go
-type Printer interface{ Write(b []byte) error }
+type Printer interface{ Write([]byte) error }
+
+// Phần DUY NHẤT của đường USB phụ thuộc hệ điều hành.
+type USBBackend interface {
+	Discover() ([]Found, error)               // máy in đang cắm + danh tính
+	Open(path string) (io.WriteCloser, error) // luồng ghi CHẶN tới một máy
+}
 ```
+
+Linux tự đăng ký `USBBackend` (`/dev/usb/lp*` + sysfs). Android cắm bản của nó qua
+`printer.SetUSBBackend`. Phân giải danh tính trước mỗi lần in, hai mốc chờ 15s + 45s, cờ
+`Delivered` và luật "0 khớp thì không ghi bừa" nằm phía trên interface này, nên **mọi nền
+tảng dùng chung**, không nền tảng nào tự viết lại.
 
 ## Build
 
