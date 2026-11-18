@@ -222,6 +222,34 @@ func TestApplyBindingsKhoaLaMayInMoiThiNoiRa(t *testing.T) {
 	}
 }
 
+// Sự cố Trang Campuchia 2026-11-18: thêm máy KOT trên web, trỏ CHUNG máy bill có
+// model "USB Printer". Trước bản sửa, chuỗi `usb://USB%20Printer?…` không đọc được →
+// máy KOT (chưa có mục cũ) bị bỏ rơi, máy bill sống sót chỉ nhờ mục cũ từ `pair`.
+func TestApplyBindingsModelCoDauCachGanTuWeb(t *testing.T) {
+	const key = "usb://USB%20Printer?ids=0471%3A0055&mfg=USB+printer&serial=11111111&usb_path=1-3"
+	bill := usbBind(4, "/dev/usb/lp1", printer.Identity{
+		Serial: "11111111", IDs: "0471:0055", USBPath: "1-3", Model: "USB Printer", Mfg: "USB printer",
+	})
+	c := &Config{Printers: []Binding{bill}}
+
+	changed, warns := c.ApplyBindings([]DeviceAssignment{
+		{PrinterID: 4, DeviceKey: key},
+		{PrinterID: 6, DeviceKey: key},
+	})
+	if len(warns) != 0 {
+		t.Errorf("chuỗi hợp lệ không được sinh cảnh báo: %v", warns)
+	}
+	if !changed || c.find(6) == nil {
+		t.Fatalf("máy KOT gán từ web phải vào cấu hình: %+v", c.Printers)
+	}
+	if got := c.find(6).Printer.Identity; got == nil || got.Serial != "11111111" {
+		t.Errorf("KOT phải mang danh tính máy bill: %+v", got)
+	}
+	if c.find(4).Printer.Target != "/dev/usb/lp1" {
+		t.Errorf("máy bill phải giữ target cũ: %+v", c.find(4).Printer)
+	}
+}
+
 // Danh tính ERP gửi xuống hỏng → không được ghi đè mục đang chạy bằng thứ hỏng đó.
 func TestApplyBindingsDanhTinhHongThiGiuMucCu(t *testing.T) {
 	cu := usbBind(7, "/dev/usb/lp0", printer.Identity{Serial: "1C79EC420000"})

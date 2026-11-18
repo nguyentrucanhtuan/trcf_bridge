@@ -219,6 +219,44 @@ func TestKeyRoundTrip(t *testing.T) {
 	}
 }
 
+// Máy bill THẬT ở quán Trang Campuchia, đo 2026-11-18: model USB khai "USB Printer"
+// (có dấu cách). `Key()` mã hoá thành `usb://USB%20Printer?…`, mà `url.Parse` của Go
+// cấm `%20` ở phần host → máy in gán từ web bị agent bỏ khỏi cấu hình, phiếu bếp
+// báo "máy tính này không cầm máy in id 6". Model chỉ để hiển thị nhưng một model
+// "xấu" không được phép làm hỏng cả chuỗi danh tính.
+func TestKeyRoundTripModelCoKyTuDacBiet(t *testing.T) {
+	for _, model := range []string{"USB Printer", "USB Printer Port", "POS 80/II", "A?B#C%D", "Máy in bếp"} {
+		want := Identity{
+			Serial: "11111111", IDs: "0471:0055", USBPath: "1-3",
+			Model: model, Mfg: "USB printer",
+		}
+		got, err := ParseIdentity(want.Key())
+		if err != nil {
+			t.Fatalf("model %q: ParseIdentity(%q): %v", model, want.Key(), err)
+		}
+		if got != want {
+			t.Errorf("model %q: vòng lặp lệch: %+v ≠ %+v", model, got, want)
+		}
+	}
+}
+
+// Chuỗi ĐÚNG NHƯ ERP quán Trang Campuchia đang lưu trong `print_agent_bindings` —
+// phải đọc được nguyên văn, không bắt quán ghép lại.
+func TestParseIdentityChuoiThatTrangCampuchia(t *testing.T) {
+	const key = "usb://USB%20Printer?ids=0471%3A0055&mfg=USB+printer&serial=11111111&usb_path=1-3"
+	got, err := ParseIdentity(key)
+	if err != nil {
+		t.Fatalf("ParseIdentity: %v", err)
+	}
+	want := Identity{Serial: "11111111", IDs: "0471:0055", USBPath: "1-3", Model: "USB Printer", Mfg: "USB printer"}
+	if got != want {
+		t.Errorf("%+v ≠ %+v", got, want)
+	}
+	if got.Key() != key {
+		t.Errorf("Key() phải dựng lại đúng chuỗi ERP đang giữ (không thì agent tưởng bản gán đổi):\n%s\n%s", got.Key(), key)
+	}
+}
+
 func TestParseIdentityTuChoiChuoiLa(t *testing.T) {
 	if _, err := ParseIdentity("net://192.168.1.60:9100"); err == nil {
 		t.Error("chuỗi không phải usb:// thì phải báo lỗi")

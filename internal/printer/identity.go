@@ -184,17 +184,33 @@ func (i Identity) Key() string {
 }
 
 // ParseIdentity đọc ngược `Key()`. Chuỗi không phải dạng `usb://` → lỗi.
+//
+// TỰ TÁCH chuỗi chứ không qua `url.Parse` (sự cố Trang Campuchia, 2026-11-18):
+// `Key()` đặt model vào chỗ HOST, mà `url.Parse` cấm mọi `%XX` ở host trừ `%25`
+// và byte ≥ 0x80. Model "USB Printer" → `USB%20Printer` → cả chuỗi bị từ chối,
+// mất luôn serial/ids — tức là máy in gán từ web bị agent vứt khỏi cấu hình.
+// Model chỉ để HIỂN THỊ, nên nó không bao giờ được làm hỏng phần khớp.
+//
+// Định dạng `Key()` GIỮ NGUYÊN: ERP lưu và so chuỗi thô, đổi cách dựng là mọi
+// bản gán đang chạy bị coi như "đã đổi".
 func ParseIdentity(s string) (Identity, error) {
-	u, err := url.Parse(s)
+	rest, ok := strings.CutPrefix(s, "usb://")
+	if !ok {
+		return Identity{}, fmt.Errorf("danh tính máy in %q không phải dạng usb://", s)
+	}
+	host, rawQuery, _ := strings.Cut(rest, "?")
+	q, err := url.ParseQuery(rawQuery)
 	if err != nil {
 		return Identity{}, fmt.Errorf("danh tính máy in không đọc được %q: %w", s, err)
 	}
-	if u.Scheme != "usb" {
-		return Identity{}, fmt.Errorf("danh tính máy in %q không phải dạng usb://", s)
+	// `%XX` HỢP LỆ (như `%20`) thì đọc được; mã hoá hỏng thật (`%zz`) vẫn là lỗi —
+	// chuỗi hỏng là dấu hiệu dữ liệu bên ERP có vấn đề, và người gọi
+	// (`ApplyBindings`) dựa vào lỗi này để GIỮ mục đang chạy thay vì ghi đè bằng nó.
+	model, err := url.PathUnescape(host)
+	if err != nil {
+		return Identity{}, fmt.Errorf("danh tính máy in không đọc được %q: %w", s, err)
 	}
-	q := u.Query()
-	model, err := url.PathUnescape(u.Host)
-	if err != nil || model == "printer" {
+	if model == "printer" {
 		model = ""
 	}
 	return Identity{
